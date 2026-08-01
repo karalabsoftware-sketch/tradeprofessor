@@ -1,0 +1,36 @@
+# Triggers the paper-trading evaluation every 4 hours.
+# Vercel Hobby crons are limited to once/day, so scheduling lives here instead.
+#
+# Required repo secrets (Settings > Secrets and variables > Actions):
+#   CRON_SECRET   — same value as the Vercel env var of the same name
+#   EVALUATE_URL  — https://<your-app>.vercel.app/api/cron/evaluate
+#
+# Runs at :05 past each 4h boundary so the 4h candle is guaranteed closed.
+# GitHub cron drift of a few minutes is harmless: the endpoint only ever acts
+# on the last CLOSED candle and is idempotent per candle.
+
+name: papertrade-evaluate
+
+on:
+  schedule:
+    - cron: "5 */4 * * *"
+  workflow_dispatch: {}
+
+jobs:
+  evaluate:
+    runs-on: ubuntu-latest
+    timeout-minutes: 3
+    steps:
+      - name: Call evaluate endpoint
+        run: |
+          status=$(curl -sS -o response.json -w "%{http_code}" \
+            --retry 2 --retry-delay 10 --max-time 60 \
+            -X POST \
+            -H "Authorization: Bearer ${{ secrets.CRON_SECRET }}" \
+            "${{ secrets.EVALUATE_URL }}")
+          echo "HTTP $status"
+          cat response.json
+          if [ "$status" != "200" ]; then
+            echo "::error::evaluate endpoint returned HTTP $status"
+            exit 1
+          fi
