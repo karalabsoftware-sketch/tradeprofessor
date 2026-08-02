@@ -1,6 +1,7 @@
 "use client";
 
 import { useMemo, useRef, useState } from "react";
+import { fmtDate, fmtDateTimeTz } from "@/lib/format";
 
 export interface EquityPoint {
   t: number; // candle open time, ms
@@ -130,7 +131,7 @@ export default function EquityChart({ points, baseline }: Props) {
             whiteSpace: "nowrap",
           }}
         >
-          <div className="muted">{fmtDateTime(h.t)}</div>
+          <div className="muted">{fmtDateTimeTz(h.t)}</div>
           <div style={{ fontWeight: 700, fontVariantNumeric: "tabular-nums" }}>
             ${h.equity.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}
           </div>
@@ -140,10 +141,3 @@ export default function EquityChart({ points, baseline }: Props) {
   );
 }
 
-function fmtDate(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 10);
-}
-
-function fmtDateTime(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
-}

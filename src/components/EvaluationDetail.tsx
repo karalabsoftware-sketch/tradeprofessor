@@ -1,4 +1,5 @@
 import { CONFIG } from "@/config/strategy";
+import { fmtDateTime } from "@/lib/format";
 
 /**
  * Renders the full "why" behind one evaluation: the candle, the indicator
@@ -51,7 +52,7 @@ export default function EvaluationDetail({ candleTime, action, reason, details }
       <div className="eval-head">
         <div>
           <span className="muted" style={{ fontSize: 12 }}>
-            {candleTime ? `${utc(candleTime)} candle` : "no candle"}
+            {candleTime ? `${fmtDateTime(candleTime)} candle` : "no candle"}
           </span>
           <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2 }}>
             {traded ? (
@@ -203,8 +204,4 @@ function rsiDetail(g: EvalGates): string {
 function num(v: number | null | undefined): string {
   if (v === null || v === undefined) return "—";
   return v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-}
-
-function utc(ms: number): string {
-  return new Date(ms).toISOString().slice(0, 16).replace("T", " ") + " UTC";
 }

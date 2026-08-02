@@ -171,6 +171,13 @@ curl -X POST -H "Authorization: Bearer $ADMIN_SECRET" https://<your-app>.vercel.
   were evaluated and one failed. A "scheduler looks down" banner (or a stale
   "Last successful run") means the bot is not being triggered at all.
 
+- **Times**: everything is stored and reasoned about in UTC (candle
+  boundaries, cron slots, Binance timestamps); the dashboard *displays*
+  Istanbul time. The zone is set once in `CONFIG.display.timeZone` and passed
+  explicitly to `Intl`, never read from the runtime's local clock — so the
+  server render, the browser and CI all agree. Change that one value to
+  re-target the display; nothing else needs touching.
+
 - **Binance geo-blocks**: the client tries `data-api.binance.vision` (Binance's
   market-data mirror) before `api.binance.com`, because the main host returns
   HTTP 451 from some Vercel regions.

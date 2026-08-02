@@ -85,6 +85,14 @@ export const CONFIG = {
    * scheduler run heal on the next poll. Changing these does not require a
    * STRATEGY_VERSION bump.
    */
+  /**
+   * Presentation only. All storage and logic stay in UTC; this just chooses
+   * the zone the dashboard renders timestamps in.
+   */
+  display: {
+    timeZone: "Europe/Istanbul",
+  },
+
   schedule: {
     /** External scheduler polls hourly at this minute past the hour (UTC). */
     pollMinute: 23,

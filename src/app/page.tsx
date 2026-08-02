@@ -9,6 +9,7 @@ import {
 } from "@/lib/metrics";
 import EquityChart from "@/components/EquityChart";
 import EvaluationDetail, { EvalDetails } from "@/components/EvaluationDetail";
+import { fmtDateTime, tzLabel } from "@/lib/format";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -162,12 +163,12 @@ export default async function Dashboard() {
           <div className="stat-row">
             <span className="k">Last successful run</span>
             <span className="num">
-              {state.last_eval_at ? `${utc(state.last_eval_at)} (${formatAge(health.ageMs ?? 0)} ago)` : "never"}
+              {state.last_eval_at ? `${ts(state.last_eval_at)} (${formatAge(health.ageMs ?? 0)} ago)` : "never"}
             </span>
           </div>
-          <div className="stat-row"><span className="k">Last candle evaluated</span><span className="num">{state.last_candle_time ? utc(new Date(state.last_candle_time)) : "—"}</span></div>
-          <div className="stat-row"><span className="k">Next check</span><span className="num">{utc(nextCheck)}</span></div>
-          <div className="stat-row"><span className="k">Next possible decision</span><span className="num">{utc(nextDecision)} (4h close)</span></div>
+          <div className="stat-row"><span className="k">Last candle evaluated</span><span className="num">{state.last_candle_time ? ts(new Date(state.last_candle_time)) : "—"}</span></div>
+          <div className="stat-row"><span className="k">Next check</span><span className="num">{ts(nextCheck)}</span></div>
+          <div className="stat-row"><span className="k">Next possible decision</span><span className="num">{ts(nextDecision)} (4h close)</span></div>
           <div className="stat-row"><span className="k">Consecutive losses</span><span className="num">{state.consecutive_losses} / {CONFIG.risk.maxConsecutiveLosses}</span></div>
           <div className="stat-row"><span className="k">Strategy version</span><span className="num">{STRATEGY_VERSION}</span></div>
           <div className="stat-row"><span className="k">Symbols</span><span className="num">{CONFIG.symbols.map((s) => `${s.symbol}${s.enabled ? "" : " (off)"}`).join(" · ")}</span></div>
@@ -183,14 +184,14 @@ export default async function Dashboard() {
               <table>
                 <thead>
                   <tr>
-                    <th>Entry (UTC)</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
+                    <th>Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
                     <th>Fees</th><th>P/L $</th><th>P/L %</th><th>Exit reason</th><th>Version</th>
                   </tr>
                 </thead>
                 <tbody>
                   {openTrade && (
                     <tr>
-                      <td className="num">{utc(openTrade.entry_time)}</td>
+                      <td className="num">{ts(openTrade.entry_time)}</td>
                       <td><SideBadge side={openTrade.side} /></td>
                       <td className="num">{px(openTrade.entry_price)}</td>
                       <td className="num muted">open</td>
@@ -203,7 +204,7 @@ export default async function Dashboard() {
                   )}
                   {trades.map((t) => (
                     <tr key={t.id}>
-                      <td className="num">{utc(t.entry_time)}</td>
+                      <td className="num">{ts(t.entry_time)}</td>
                       <td><SideBadge side={t.side} /></td>
                       <td className="num">{px(t.entry_price)}</td>
                       <td className="num">{px(t.exit_price)}</td>
@@ -228,7 +229,7 @@ export default async function Dashboard() {
             {signals.length === 0 && <li className="muted">No evaluations yet.</li>}
             {signals.map((s) => (
               <li key={s.id}>
-                <span className="signal-time">{utc(s.created_at)}</span>
+                <span className="signal-time">{ts(s.created_at)}</span>
                 <span className="signal-action" style={{ color: actionColor(s.action) }}>{s.action}</span>
                 <span className="muted">{s.reason}</span>
               </li>
@@ -260,7 +261,8 @@ export default async function Dashboard() {
       </div>
 
       <footer>
-        Data: Binance public REST · scheduler checks hourly, decisions only on closed 4h candles · all times UTC
+        Data: Binance public REST · scheduler checks hourly, decisions only on closed 4h candles · all
+        times shown in Istanbul time ({tzLabel()}); candles and logs are stored in UTC
       </footer>
     </main>
   );
@@ -390,7 +392,9 @@ function Header() {
         PaperTrade BTC
         <span className="paper-badge">Paper trading</span>
       </h1>
-      <span className="muted" style={{ fontSize: 13 }}>BTCUSDT · 4h · public &amp; read-only</span>
+      <span className="muted" style={{ fontSize: 13 }}>
+        BTCUSDT · 4h · public &amp; read-only · times in {tzLabel()}
+      </span>
     </div>
   );
 }
@@ -447,6 +451,6 @@ function streakLabel(streak: number): string {
   return streak > 0 ? `${streak} win${streak > 1 ? "s" : ""}` : `${-streak} loss${streak < -1 ? "es" : ""}`;
 }
 
-function utc(d: Date): string {
-  return d.toISOString().slice(0, 16).replace("T", " ") + " UTC";
+function ts(d: Date): string {
+  return fmtDateTime(d);
 }
