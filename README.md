@@ -209,6 +209,7 @@ src/lib/binance.ts            public klines client with host fallback
 src/lib/schema.sql            Postgres schema (idempotent)
 src/app/page.tsx              public dashboard (server-rendered)
 src/components/EvaluationDetail.tsx  per-evaluation gate checklist ("why no trade")
+src/components/PriceChart.tsx        4h candles + EMA21/50/200 + RSI panel (hand-rolled SVG)
 src/app/api/cron/evaluate     scheduler endpoint (Bearer CRON_SECRET)
 src/app/api/admin/reset-halt  manual halt reset (Bearer ADMIN_SECRET)
 scripts/seed.ts               backfill 400 candles + init flat state

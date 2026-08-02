@@ -9,10 +9,15 @@ import {
 } from "@/lib/metrics";
 import EquityChart from "@/components/EquityChart";
 import EvaluationDetail, { EvalDetails } from "@/components/EvaluationDetail";
+import PriceChart, { PricePoint, TradeMarker } from "@/components/PriceChart";
 import { fmtDateTime, tzLabel } from "@/lib/format";
+import { ema, rsi } from "@/lib/indicators";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
+
+/** Candles drawn on the price chart (~20 days at 4h). */
+const CHART_CANDLES = 120;
 
 export default async function Dashboard() {
   let data: Awaited<ReturnType<typeof loadDashboard>>;
@@ -30,7 +35,7 @@ export default async function Dashboard() {
     );
   }
 
-  const { state, openTrade, trades, snapshots, signals, lastPrice } = data;
+  const { state, openTrade, trades, snapshots, signals, lastPrice, priceSeries, markers } = data;
 
   if (!state) {
     return (
@@ -124,6 +129,22 @@ export default async function Dashboard() {
               No evaluation recorded yet.
             </p>
           )}
+        </section>
+
+        {/* ---- Price chart with the strategy's own indicators ---- */}
+        <section className="card span-12">
+          <h2>BTCUSDT 4h — the same indicators the bot decides on</h2>
+          <PriceChart
+            points={priceSeries.slice(-CHART_CANDLES)}
+            markers={markers}
+            latestDecisionT={latest?.candle_time ?? null}
+          />
+          <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
+            Last {Math.min(CHART_CANDLES, priceSeries.length)} closed 4h candles. The highlighted
+            column is the candle of the latest decision. A long needs the close to cross{" "}
+            <em>above</em> EMA21 while RSI is outside the shaded dead band and EMA50 is above
+            EMA200.
+          </p>
         </section>
 
         {/* ---- Equity curve ---- */}
@@ -288,6 +309,8 @@ interface TradeRow {
   id: number;
   side: "long" | "short";
   entry_time: Date;
+  entry_candle: number;
+  exit_candle: number | null;
   entry_price: number;
   exit_price: number;
   qty: number;
@@ -302,6 +325,7 @@ interface TradeRow {
 interface OpenTradeRow {
   side: "long" | "short";
   entry_time: Date;
+  entry_candle: number;
   entry_price: number;
   qty: number;
   stop_price: number;
@@ -337,6 +361,7 @@ async function loadDashboard() {
     ? {
         side: openRows[0].side,
         entry_time: openRows[0].entry_time,
+        entry_candle: Number(openRows[0].entry_candle),
         entry_price: Number(openRows[0].entry_price),
         qty: Number(openRows[0].qty),
         stop_price: Number(openRows[0].stop_price),
@@ -350,6 +375,8 @@ async function loadDashboard() {
     id: Number(r.id),
     side: r.side,
     entry_time: r.entry_time,
+    entry_candle: Number(r.entry_candle),
+    exit_candle: r.exit_candle === null ? null : Number(r.exit_candle),
     entry_price: Number(r.entry_price),
     exit_price: Number(r.exit_price),
     qty: Number(r.qty),
@@ -375,16 +402,58 @@ async function loadDashboard() {
     details: (r.details ?? null) as EvalDetails | null,
   }));
 
-  let lastPrice: number | null = null;
+  // Full stored series: indicators need the long warmup even though only the
+  // recent window is drawn.
+  const candleRows = await sql`
+    SELECT open_time, open, high, low, close FROM candles
+    WHERE symbol = ${CONFIG.symbols[0].symbol} ORDER BY open_time ASC
+  `;
+  const priceSeries = buildPriceSeries(candleRows);
+  const lastPrice = priceSeries.length ? priceSeries[priceSeries.length - 1].c : null;
+
+  const markers: TradeMarker[] = [];
+  for (const t of trades) {
+    markers.push({ t: t.entry_candle, kind: "entry", side: t.side, price: t.entry_price });
+    if (t.exit_candle !== null) {
+      markers.push({ t: t.exit_candle, kind: "exit", side: t.side, price: t.exit_price });
+    }
+  }
   if (openTrade) {
-    const priceRows = await sql`
-      SELECT close FROM candles WHERE symbol = ${CONFIG.symbols[0].symbol}
-      ORDER BY open_time DESC LIMIT 1
-    `;
-    if (priceRows.length) lastPrice = Number(priceRows[0].close);
+    markers.push({
+      t: openTrade.entry_candle,
+      kind: "entry",
+      side: openTrade.side,
+      price: openTrade.entry_price,
+    });
   }
 
-  return { state, openTrade, trades, snapshots, signals, lastPrice };
+  return { state, openTrade, trades, snapshots, signals, lastPrice, priceSeries, markers };
+}
+
+/** Candle rows -> chart points with the strategy's indicators attached. */
+function buildPriceSeries(rows: readonly Record<string, unknown>[]): PricePoint[] {
+  const candles = rows.map((r) => ({
+    t: Number(r.open_time),
+    o: Number(r.open),
+    h: Number(r.high),
+    l: Number(r.low),
+    c: Number(r.close),
+  }));
+  if (candles.length === 0) return [];
+
+  const closes = candles.map((c) => c.c);
+  const e21 = ema(closes, CONFIG.indicators.emaFast);
+  const e50 = ema(closes, CONFIG.indicators.emaMid);
+  const e200 = ema(closes, CONFIG.indicators.emaSlow);
+  const r14 = rsi(closes, CONFIG.indicators.rsiPeriod);
+
+  return candles.map((c, i) => ({
+    ...c,
+    ema21: e21[i],
+    ema50: e50[i],
+    ema200: e200[i],
+    rsi: r14[i],
+  }));
 }
 
 /* ---------------- presentation helpers ---------------- */
