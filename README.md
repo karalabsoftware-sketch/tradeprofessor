@@ -209,6 +209,45 @@ curl -X POST -H "Authorization: Bearer $ADMIN_SECRET" https://<your-app>.vercel.
   market-data mirror) before `api.binance.com`, because the main host returns
   HTTP 451 from some Vercel regions.
 
+## Backtesting variants
+
+```bash
+npm run backtest
+```
+
+Read-only: no database, no effect on the live bot. What the bot trades is
+fixed by [src/config/strategy.ts](src/config/strategy.ts) and changes only
+when that file is edited and its version bumped.
+
+```bash
+npm run backtest -- --candles 6000 --split 0.6 --variant donchian
+```
+
+The harness **reuses the live paper-fill code** (`src/lib/fills.ts`), so
+slippage, fees and the stop-before-target rule are literally the same code
+path the bot runs; only strategy parameters vary. A test asserts that the
+`baseline` variant produces the same entry decision as the engine's
+`decideEntry` on every candle — if they ever drift, the suite fails rather
+than silently reporting numbers for a strategy the bot does not run.
+
+**Read the HOLDOUT table, not the TRAIN one.** History is split in two;
+variants are chosen by looking at the training half, and the holdout half is
+the honest estimate. This is not ceremony — in the first run, the
+`donchian 20` variant was the *best* performer in training (+$6,814, PF 1.39)
+and the *worst* in holdout (−$1,166, PF 0.84). Picking by backtest alone would
+have selected exactly the wrong strategy.
+
+Other guards against fooling yourself: keep the variant list short (the runner
+prints the count — the more you try, the more the winner is luck), prefer a
+parameter *plateau* over a lone spike, and remember that paper trading is the
+final out-of-sample test.
+
+Lookahead is guarded structurally: indicators are causal, the daily regime for
+a 4h candle uses only daily candles that had already closed, Donchian windows
+exclude the current candle, entries fill at the signal candle's close with
+exits checked from the next candle, and trailing stops move only after the
+candle they derive from has closed. Tests cover each of these.
+
 ## Strategy (v1.0.0 — exact rules)
 
 - BTCUSDT 4h (ETH/SOL implemented, disabled by config flag). Indicators on 4h
@@ -240,6 +279,8 @@ src/components/PriceChart.tsx        4h candles + EMA21/50/200 + RSI panel (hand
 src/app/api/cron/evaluate     scheduler endpoint (Bearer CRON_SECRET)
 src/app/api/admin/reset-halt  manual halt reset (Bearer ADMIN_SECRET)
 scripts/seed.ts               backfill 400 candles + init flat state
+scripts/backtest.ts           variant comparison with train/holdout split (read-only)
+src/backtest/                 simulator, variants, history loading — shares src/lib/fills.ts
 .github/workflows/trigger.yml 4h scheduler
 tests/                        indicator + fill-simulation + entry-gate tests
 ```
