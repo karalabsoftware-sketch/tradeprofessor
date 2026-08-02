@@ -109,13 +109,13 @@ async function evaluateSymbol(sql: Sql, state: BotState, symbol: string): Promis
   // Idempotency: dedupe by candle open_time. Scheduler retries and a few
   // minutes of GitHub Actions drift land on the same closed candle -> no-op.
   if (state.last_candle_time !== null && last.openTime <= state.last_candle_time) {
-    await logSignal(
-      sql,
-      symbol,
-      last.openTime,
-      "skip",
-      `candle ${new Date(last.openTime).toISOString()} already evaluated (idempotent no-op)`
-    );
+    // Heartbeat only: record that the scheduler ran and reached the data
+    // source, but write no signal row — with sub-candle polling these no-ops
+    // would otherwise bury the actual decisions in the dashboard feed.
+    await sql`
+      UPDATE bot_state SET last_eval_at = now(), last_error = NULL, updated_at = now()
+      WHERE id = 1
+    `;
     return {
       symbol,
       skipped: true,
@@ -275,6 +275,10 @@ async function evaluateSymbol(sql: Sql, state: BotState, symbol: string): Promis
         rsi14: round(ind.rsi14),
         atr14: round(ind.atr14),
       },
+      // Previous candle's close/EMA21 — the crossover check needs both bars,
+      // so storing them makes the logged decision independently verifiable.
+      prev: { close: ind.prevClose, ema21: round(ind.prevEma21) },
+      gates: decision.gates,
       exits: exitLog,
       trade: openTrade && decision.enter
         ? {
@@ -330,8 +334,82 @@ interface IndicatorSnapshot {
   atr14: number | null;
 }
 
-/** Pure entry decision — exported for tests. Returns the reason in all cases. */
+/**
+ * Gate-by-gate breakdown of an entry decision. Purely descriptive metadata —
+ * it never feeds back into the decision. Stored on every signal so the
+ * dashboard can show exactly which condition blocked a trade.
+ */
+export interface EntryGates {
+  warmedUp: boolean;
+  regime: "bull" | "bear" | null;
+  allowedSide: Side | null;
+  crossedAbove: boolean;
+  crossedBelow: boolean;
+  /** A crossover event in the direction the regime allows. */
+  crossoverOk: boolean;
+  rsi: number | null;
+  inDeadBand: boolean;
+  /** RSI passes the threshold for the allowed side. */
+  rsiOk: boolean;
+  flat: boolean;
+  notHalted: boolean;
+}
+
+/**
+ * Pure entry decision — exported for tests. Returns the reason AND a
+ * gate-by-gate breakdown in all cases. The decision itself is produced by
+ * decideEntryCore below; gates are computed separately and never influence it.
+ */
 export function decideEntry(
+  ind: IndicatorSnapshot,
+  hasOpenPosition: boolean,
+  halted: boolean,
+  haltReason: string | null
+): { enter: Side | null; reason: string; gates: EntryGates } {
+  const core = decideEntryCore(ind, hasOpenPosition, halted, haltReason);
+  return { ...core, gates: computeGates(ind, hasOpenPosition, halted) };
+}
+
+function computeGates(
+  ind: IndicatorSnapshot,
+  hasOpenPosition: boolean,
+  halted: boolean
+): EntryGates {
+  const warmedUp =
+    ind.ema21 !== null &&
+    ind.prevEma21 !== null &&
+    ind.ema50 !== null &&
+    ind.ema200 !== null &&
+    ind.rsi14 !== null &&
+    ind.atr14 !== null;
+
+  const regime = warmedUp ? (ind.ema50! > ind.ema200! ? "bull" : "bear") : null;
+  const allowedSide: Side | null = regime === null ? null : regime === "bull" ? "long" : "short";
+  const up = crossedAbove(ind.prevClose, ind.prevEma21, ind.close, ind.ema21);
+  const down = crossedBelow(ind.prevClose, ind.prevEma21, ind.close, ind.ema21);
+  const r = ind.rsi14;
+
+  return {
+    warmedUp,
+    regime,
+    allowedSide,
+    crossedAbove: up,
+    crossedBelow: down,
+    crossoverOk: allowedSide === "long" ? up : allowedSide === "short" ? down : false,
+    rsi: r,
+    inDeadBand: r !== null && r >= CONFIG.entry.rsiShortMax && r <= CONFIG.entry.rsiLongMin,
+    rsiOk:
+      r === null || allowedSide === null
+        ? false
+        : allowedSide === "long"
+          ? r > CONFIG.entry.rsiLongMin
+          : r < CONFIG.entry.rsiShortMax,
+    flat: !hasOpenPosition,
+    notHalted: !halted,
+  };
+}
+
+function decideEntryCore(
   ind: IndicatorSnapshot,
   hasOpenPosition: boolean,
   halted: boolean,

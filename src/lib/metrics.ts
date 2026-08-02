@@ -66,8 +66,43 @@ export function computeMetrics(
   };
 }
 
-/** Next expected scheduler run: 5 minutes past the next 4h UTC boundary. */
-export function nextExpectedRun(nowMs: number, intervalMs: number): Date {
-  const boundary = Math.floor(nowMs / intervalMs) * intervalMs + intervalMs;
-  return new Date(boundary + 5 * 60 * 1000);
+/** Next scheduler poll: `pollMinute` past the next hour (UTC). */
+export function nextPoll(nowMs: number, pollMinute: number): Date {
+  const hourMs = 60 * 60 * 1000;
+  const candidate = Math.floor(nowMs / hourMs) * hourMs + pollMinute * 60 * 1000;
+  return new Date(candidate > nowMs ? candidate : candidate + hourMs);
+}
+
+/**
+ * Next 4h candle close — the next moment a NEW decision becomes possible.
+ * Distinct from the poll cadence: polls in between find nothing new to do.
+ */
+export function nextCandleClose(nowMs: number, intervalMs: number): Date {
+  return new Date(Math.floor(nowMs / intervalMs) * intervalMs + intervalMs);
+}
+
+export interface SchedulerHealth {
+  /** No heartbeat within the allowed window — the scheduler looks down. */
+  stale: boolean;
+  /** Milliseconds since the last successful poll, or null if it never ran. */
+  ageMs: number | null;
+}
+
+export function schedulerHealth(
+  lastEvalAt: Date | null,
+  nowMs: number,
+  stalenessMs: number
+): SchedulerHealth {
+  if (!lastEvalAt) return { stale: true, ageMs: null };
+  const ageMs = nowMs - lastEvalAt.getTime();
+  return { stale: ageMs > stalenessMs, ageMs };
+}
+
+/** "2h 14m" / "6m" — compact age for the status panel. */
+export function formatAge(ms: number): string {
+  const mins = Math.floor(ms / 60000);
+  if (mins < 60) return `${mins}m`;
+  const hours = Math.floor(mins / 60);
+  const rem = mins % 60;
+  return rem === 0 ? `${hours}h` : `${hours}h ${rem}m`;
 }

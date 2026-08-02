@@ -76,4 +76,23 @@ export const CONFIG = {
   account: {
     startingEquity: 10_000,
   },
+
+  /**
+   * Operational scheduling — NOT part of the versioned strategy surface.
+   * Decisions are always made on the last CLOSED 4h candle, so polling more
+   * often than the candle interval cannot change any trade; it only shortens
+   * the delay before a closed candle is processed and lets a dropped
+   * scheduler run heal on the next poll. Changing these does not require a
+   * STRATEGY_VERSION bump.
+   */
+  schedule: {
+    /** External scheduler polls hourly at this minute past the hour (UTC). */
+    pollMinute: 23,
+    pollIntervalMs: 60 * 60 * 1000,
+    /**
+     * No heartbeat for this long => treat the scheduler as down on the
+     * dashboard. Two and a half missed hourly polls.
+     */
+    stalenessMs: 2.5 * 60 * 60 * 1000,
+  },
 } as const;

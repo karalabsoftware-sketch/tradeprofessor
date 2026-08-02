@@ -1,19 +1,24 @@
-# Triggers the paper-trading evaluation every 4 hours.
+# Triggers the paper-trading evaluation.
 # Vercel Hobby crons are limited to once/day, so scheduling lives here instead.
 #
 # Required repo secrets (Settings > Secrets and variables > Actions):
 #   CRON_SECRET   — same value as the Vercel env var of the same name
 #   EVALUATE_URL  — https://<your-app>.vercel.app/api/cron/evaluate
 #
-# Runs at :05 past each 4h boundary so the 4h candle is guaranteed closed.
-# GitHub cron drift of a few minutes is harmless: the endpoint only ever acts
-# on the last CLOSED candle and is idempotent per candle.
+# Why hourly for a 4h strategy: GitHub's scheduler drops and delays runs,
+# especially near the top of the hour. The endpoint only ever acts on the last
+# CLOSED 4h candle and replays every candle since the previous run, so polling
+# hourly cannot change a single trade — it just means a dropped run heals on
+# the next attempt instead of costing a full 4h cycle. Public repos get
+# unlimited free Actions minutes, so the extra runs cost nothing.
+#
+# Minute 23 deliberately avoids the :00-:10 congestion window.
 
 name: papertrade-evaluate
 
 on:
   schedule:
-    - cron: "5 */4 * * *"
+    - cron: "23 * * * *"
   workflow_dispatch: {}
 
 jobs:

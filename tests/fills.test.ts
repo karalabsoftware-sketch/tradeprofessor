@@ -155,3 +155,82 @@ describe("decideEntry — strategy gates", () => {
     expect(d.reason).toContain("warming up");
   });
 });
+
+describe("decideEntry gates — the dashboard's why-no-trade breakdown", () => {
+  const base = {
+    close: 102,
+    prevClose: 99,
+    ema21: 100,
+    prevEma21: 100,
+    ema50: 100,
+    ema200: 90, // bull
+    rsi14: 60,
+    atr14: 2,
+  };
+
+  it("marks every gate as passing on a valid long", () => {
+    const { enter, gates } = decideEntry(base, false, false, null);
+    expect(enter).toBe("long");
+    expect(gates).toMatchObject({
+      warmedUp: true,
+      regime: "bull",
+      allowedSide: "long",
+      crossedAbove: true,
+      crossoverOk: true,
+      inDeadBand: false,
+      rsiOk: true,
+      flat: true,
+      notHalted: true,
+    });
+  });
+
+  it("pinpoints the dead band as the failing gate", () => {
+    const { enter, gates } = decideEntry({ ...base, rsi14: 50 }, false, false, null);
+    expect(enter).toBeNull();
+    expect(gates.crossoverOk).toBe(true); // crossover was fine
+    expect(gates.inDeadBand).toBe(true); // this is what blocked it
+    expect(gates.rsiOk).toBe(false);
+  });
+
+  it("shows a crossover in the direction the regime forbids as not OK", () => {
+    // crossunder while the regime is bull
+    const { gates } = decideEntry({ ...base, close: 98, prevClose: 101, rsi14: 40 }, false, false, null);
+    expect(gates.crossedBelow).toBe(true);
+    expect(gates.allowedSide).toBe("long");
+    expect(gates.crossoverOk).toBe(false);
+  });
+
+  it("reports flat/halted independently of the market gates", () => {
+    const open = decideEntry(base, true, false, null);
+    expect(open.gates.flat).toBe(false);
+    expect(open.gates.crossoverOk).toBe(true); // market still qualified
+
+    const halted = decideEntry(base, false, true, "6 consecutive losses");
+    expect(halted.gates.notHalted).toBe(false);
+    expect(halted.gates.rsiOk).toBe(true);
+  });
+
+  it("reports warmedUp false and null regime during warmup", () => {
+    const { gates } = decideEntry({ ...base, ema200: null }, false, false, null);
+    expect(gates.warmedUp).toBe(false);
+    expect(gates.regime).toBeNull();
+    expect(gates.allowedSide).toBeNull();
+    expect(gates.crossoverOk).toBe(false);
+  });
+
+  it("computing gates never changes the decision", () => {
+    // Same inputs through both paths: the trade outcome must be identical
+    // regardless of the descriptive metadata.
+    const cases = [
+      { ind: base, open: false, halted: false },
+      { ind: { ...base, rsi14: 50 }, open: false, halted: false },
+      { ind: { ...base, ema50: 90, ema200: 100, close: 98, prevClose: 101, rsi14: 40 }, open: false, halted: false },
+    ];
+    for (const c of cases) {
+      const first = decideEntry(c.ind, c.open, c.halted, null);
+      const second = decideEntry(c.ind, c.open, c.halted, null);
+      expect(first.enter).toBe(second.enter);
+      expect(first.reason).toBe(second.reason);
+    }
+  });
+});

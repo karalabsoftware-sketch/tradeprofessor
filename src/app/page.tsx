@@ -1,7 +1,14 @@
 import { CONFIG, STRATEGY_VERSION } from "@/config/strategy";
 import { db } from "@/lib/db";
-import { computeMetrics, nextExpectedRun } from "@/lib/metrics";
+import {
+  computeMetrics,
+  formatAge,
+  nextCandleClose,
+  nextPoll,
+  schedulerHealth,
+} from "@/lib/metrics";
 import EquityChart from "@/components/EquityChart";
+import EvaluationDetail, { EvalDetails } from "@/components/EvaluationDetail";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
@@ -37,12 +44,28 @@ export default async function Dashboard() {
   const metrics = computeMetrics(trades, equitySeries);
   const markEquity = snapshots.length > 0 ? snapshots[snapshots.length - 1].equity : state.equity;
   const totalReturn = ((markEquity - CONFIG.account.startingEquity) / CONFIG.account.startingEquity) * 100;
-  const nextRun = nextExpectedRun(Date.now(), CONFIG.intervalMs);
+
+  const now = Date.now();
+  const health = schedulerHealth(state.last_eval_at, now, CONFIG.schedule.stalenessMs);
+  const nextCheck = nextPoll(now, CONFIG.schedule.pollMinute);
+  const nextDecision = nextCandleClose(now, CONFIG.intervalMs);
+  const latest = signals.find((s) => s.action !== "skip") ?? null;
 
   return (
     <main className="wrap">
       <Header />
 
+      {health.stale && (
+        <div className="error-banner">
+          🕓 <strong>Scheduler looks down.</strong>{" "}
+          {health.ageMs === null
+            ? "The bot has never completed an evaluation."
+            : `No successful run for ${formatAge(health.ageMs)} (expected roughly hourly).`}{" "}
+          Stops and targets are still replayed across every missed candle, but an
+          entry signal on a candle that was skipped over is not backfilled — check
+          the GitHub Actions tab.
+        </div>
+      )}
       {state.halted && (
         <div className="halt-banner">
           ⛔ <strong>Risk engine halt:</strong> new entries are blocked — {state.halt_reason}. Open
@@ -83,6 +106,23 @@ export default async function Dashboard() {
           )}
         </section>
 
+        {/* ---- Why the last evaluation did (or didn't) trade ---- */}
+        <section className="card span-12">
+          <h2>Latest decision — why the bot did or didn&apos;t trade</h2>
+          {latest ? (
+            <EvaluationDetail
+              candleTime={latest.candle_time}
+              action={latest.action}
+              reason={latest.reason}
+              details={latest.details}
+            />
+          ) : (
+            <p className="muted" style={{ fontSize: 13 }}>
+              No evaluation recorded yet.
+            </p>
+          )}
+        </section>
+
         {/* ---- Equity curve ---- */}
         <section className="card span-12">
           <h2>Equity curve — one point per evaluation (USD)</h2>
@@ -110,13 +150,24 @@ export default async function Dashboard() {
           <div className="stat-row">
             <span className="k">State</span>
             <span>
-              <span className="status-dot" style={{ background: state.halted ? "var(--bad)" : "var(--good)" }} />
-              {state.halted ? `HALTED — ${state.halt_reason}` : "active"}
+              <span
+                className="status-dot"
+                style={{
+                  background: state.halted ? "var(--bad)" : health.stale ? "var(--warn)" : "var(--good)",
+                }}
+              />
+              {state.halted ? `HALTED — ${state.halt_reason}` : health.stale ? "scheduler down" : "active"}
             </span>
           </div>
-          <div className="stat-row"><span className="k">Last evaluation</span><span className="num">{state.last_eval_at ? utc(state.last_eval_at) : "never"}</span></div>
+          <div className="stat-row">
+            <span className="k">Last successful run</span>
+            <span className="num">
+              {state.last_eval_at ? `${utc(state.last_eval_at)} (${formatAge(health.ageMs ?? 0)} ago)` : "never"}
+            </span>
+          </div>
           <div className="stat-row"><span className="k">Last candle evaluated</span><span className="num">{state.last_candle_time ? utc(new Date(state.last_candle_time)) : "—"}</span></div>
-          <div className="stat-row"><span className="k">Next expected run</span><span className="num">{utc(nextRun)}</span></div>
+          <div className="stat-row"><span className="k">Next check</span><span className="num">{utc(nextCheck)}</span></div>
+          <div className="stat-row"><span className="k">Next possible decision</span><span className="num">{utc(nextDecision)} (4h close)</span></div>
           <div className="stat-row"><span className="k">Consecutive losses</span><span className="num">{state.consecutive_losses} / {CONFIG.risk.maxConsecutiveLosses}</span></div>
           <div className="stat-row"><span className="k">Strategy version</span><span className="num">{STRATEGY_VERSION}</span></div>
           <div className="stat-row"><span className="k">Symbols</span><span className="num">{CONFIG.symbols.map((s) => `${s.symbol}${s.enabled ? "" : " (off)"}`).join(" · ")}</span></div>
@@ -209,7 +260,7 @@ export default async function Dashboard() {
       </div>
 
       <footer>
-        Data: Binance public REST · evaluated every 4h via external scheduler · all times UTC
+        Data: Binance public REST · scheduler checks hourly, decisions only on closed 4h candles · all times UTC
       </footer>
     </main>
   );
@@ -260,7 +311,7 @@ async function loadDashboard() {
     sql`SELECT * FROM trades WHERE status = 'open' ORDER BY id LIMIT 1`,
     sql`SELECT * FROM trades WHERE status = 'closed' ORDER BY exit_candle DESC, id DESC LIMIT 300`,
     sql`SELECT candle_time, equity FROM equity_snapshots ORDER BY id ASC LIMIT 2000`,
-    sql`SELECT id, created_at, action, reason FROM signals ORDER BY id DESC LIMIT 10`,
+    sql`SELECT id, created_at, candle_time, action, reason, details FROM signals ORDER BY id DESC LIMIT 12`,
   ]);
 
   const state: StateRow | null = stateRows.length
@@ -312,8 +363,10 @@ async function loadDashboard() {
   const signals = signalRows.map((r) => ({
     id: Number(r.id),
     created_at: r.created_at as Date,
+    candle_time: r.candle_time === null ? null : Number(r.candle_time),
     action: String(r.action),
     reason: String(r.reason),
+    details: (r.details ?? null) as EvalDetails | null,
   }));
 
   let lastPrice: number | null = null;

@@ -11,7 +11,7 @@ Paper trading is the out-of-sample validation phase: the target is **90 days or
 ## How it works
 
 ```
-GitHub Actions (cron: 5 */4 * * *)
+GitHub Actions (cron: 23 * * * *  — hourly poll)
         │  POST /api/cron/evaluate  (Authorization: Bearer CRON_SECRET)
         ▼
 Vercel (Next.js App Router, Node runtime, <10s)
@@ -31,7 +31,22 @@ Postgres (Neon/Supabase free tier): candles · signals · trades · equity_snaps
   from different versions are never mixed. Changing any parameter requires a
   version bump.
 - **Idempotent**: decisions key off the last *closed* candle's open time, so
-  scheduler retries and a few minutes of GitHub cron drift are no-ops.
+  scheduler retries and a few minutes of GitHub cron drift are no-ops. A poll
+  that finds nothing new updates a heartbeat (`bot_state.last_eval_at`) and
+  writes no signal row, which is what the dashboard's "scheduler down"
+  indicator watches.
+- **Hourly polling for a 4h strategy**: GitHub's scheduler drops and delays
+  runs, so the workflow polls hourly instead of every 4h. This cannot change a
+  trade — decisions are still made only on closed 4h candles — it just means a
+  dropped run heals within an hour instead of costing a full cycle. Public
+  repos get unlimited free Actions minutes, so the extra polls cost nothing.
+  Caveat: stops/targets are replayed across every missed candle, but an entry
+  signal on a candle the bot skipped over is **not** backfilled.
+- **Every decision is auditable**: each evaluation stores the candle, all
+  indicator values, the previous candle's close/EMA21 (so the crossover check
+  can be re-verified independently) and a gate-by-gate pass/fail breakdown.
+  The dashboard renders that breakdown, so "the bot is broken" and "the market
+  did not qualify" are never confused.
 - **Conservative fills**: entry at close ±0.05% slippage against direction;
   0.1% fee per fill; if one candle touches both stop and target, the **stop is
   assumed to hit first**; stop/forced exits also pay slippage, targets fill at
@@ -113,8 +128,14 @@ curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/c
 ### 5. Scheduler (GitHub Actions)
 
 [.github/workflows/trigger.yml](.github/workflows/trigger.yml) calls the
-endpoint at 00:05, 04:05, 08:05 … UTC (:05 past the boundary so the candle is
-closed; drift is harmless — see idempotency above).
+endpoint hourly at :23 past the hour. Minute 23 avoids the top-of-hour
+congestion window where GitHub is most likely to delay or drop scheduled runs.
+
+> Note: GitHub's scheduled triggers are best-effort and can be delayed by
+> tens of minutes or skipped entirely — a newly pushed schedule may also take
+> a while to register. That unreliability is exactly why the poll is hourly
+> rather than every 4h. If runs stop entirely, the dashboard shows a
+> "scheduler looks down" banner based on the heartbeat.
 
 In the GitHub repo: **Settings → Secrets and variables → Actions → New
 repository secret**:
@@ -142,7 +163,13 @@ curl -X POST -H "Authorization: Bearer $ADMIN_SECRET" https://<your-app>.vercel.
 
 - **Every decision is logged** to `signals`, including *why no trade happened*
   (no crossover / RSI dead band / wrong regime / halted / warmup), with full
-  indicator values in `details`. The last 10 appear on the dashboard.
+  indicator values and the gate breakdown in `details`. The dashboard shows the
+  newest decision in full plus a feed of recent ones.
+
+- **Is it broken, or did the market just not qualify?** The "Latest decision"
+  card answers this directly: a red ✗ next to a specific gate means the rules
+  were evaluated and one failed. A "scheduler looks down" banner (or a stale
+  "Last successful run") means the bot is not being triggered at all.
 
 - **Binance geo-blocks**: the client tries `data-api.binance.vision` (Binance's
   market-data mirror) before `api.binance.com`, because the main host returns
@@ -174,6 +201,7 @@ src/lib/engine.ts             evaluation state machine (exits → risk → entry
 src/lib/binance.ts            public klines client with host fallback
 src/lib/schema.sql            Postgres schema (idempotent)
 src/app/page.tsx              public dashboard (server-rendered)
+src/components/EvaluationDetail.tsx  per-evaluation gate checklist ("why no trade")
 src/app/api/cron/evaluate     scheduler endpoint (Bearer CRON_SECRET)
 src/app/api/admin/reset-halt  manual halt reset (Bearer ADMIN_SECRET)
 scripts/seed.ts               backfill 400 candles + init flat state
