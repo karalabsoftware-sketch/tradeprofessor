@@ -116,6 +116,8 @@ export default async function Dashboard() {
               action={latest.action}
               reason={latest.reason}
               details={latest.details}
+              evaluatedAt={latest.created_at}
+              stale={health.stale}
             />
           ) : (
             <p className="muted" style={{ fontSize: 13 }}>
@@ -229,7 +231,9 @@ export default async function Dashboard() {
             {signals.length === 0 && <li className="muted">No evaluations yet.</li>}
             {signals.map((s) => (
               <li key={s.id}>
-                <span className="signal-time">{ts(s.created_at)}</span>
+                <span className="signal-time">
+                  {s.candle_time ? `${ts(new Date(s.candle_time))} candle` : ts(s.created_at)}
+                </span>
                 <span className="signal-action" style={{ color: actionColor(s.action) }}>{s.action}</span>
                 <span className="muted">{s.reason}</span>
               </li>

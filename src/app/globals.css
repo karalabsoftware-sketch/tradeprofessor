@@ -310,6 +310,27 @@ tr:last-child td { border-bottom: none; }
 .gate-neutral .gate-mark { color: var(--ink-2); }
 .gate-fail .gate-label { color: var(--ink); }
 
+.missing-list {
+  list-style: none;
+  font-size: 13px;
+}
+
+.missing-list li {
+  position: relative;
+  padding: 6px 0 6px 20px;
+  color: var(--ink-2);
+  border-bottom: 1px solid var(--border);
+}
+
+.missing-list li:last-child { border-bottom: none; }
+
+.missing-list li::before {
+  content: "→";
+  position: absolute;
+  left: 0;
+  color: var(--accent);
+}
+
 .signal-list { font-size: 13px; }
 .signal-list li {
   list-style: none;

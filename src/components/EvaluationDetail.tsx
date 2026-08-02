@@ -2,9 +2,12 @@ import { CONFIG } from "@/config/strategy";
 import { fmtDateTime } from "@/lib/format";
 
 /**
- * Renders the full "why" behind one evaluation: the candle, the indicator
- * values, and every entry gate marked pass/fail. Answers "is the bot broken
- * or did the market just not qualify?" without reading logs.
+ * Renders the full "why" behind one evaluation: which candle it was for, the
+ * indicator values, every entry gate marked pass/fail, and — when no trade was
+ * taken — exactly what would have to change for one to happen.
+ *
+ * Answers "is the bot broken or did the market just not qualify?" without
+ * reading logs.
  */
 
 export interface EvalGates {
@@ -40,9 +43,20 @@ interface Props {
   action: string;
   reason: string;
   details: EvalDetails | null;
+  /** When the bot actually ran this evaluation (distinct from the candle). */
+  evaluatedAt: Date | null;
+  /** True when the scheduler is overdue — this decision may be stale. */
+  stale?: boolean;
 }
 
-export default function EvaluationDetail({ candleTime, action, reason, details }: Props) {
+export default function EvaluationDetail({
+  candleTime,
+  action,
+  reason,
+  details,
+  evaluatedAt,
+  stale,
+}: Props) {
   const g = details?.gates;
   const ind = details?.indicators;
   const traded = action.startsWith("entry");
@@ -52,7 +66,15 @@ export default function EvaluationDetail({ candleTime, action, reason, details }
       <div className="eval-head">
         <div>
           <span className="muted" style={{ fontSize: 12 }}>
-            {candleTime ? `${fmtDateTime(candleTime)} candle` : "no candle"}
+            {candleTime ? (
+              <>
+                Candle <strong>{fmtDateTime(candleTime)}</strong> →{" "}
+                <strong>{fmtDateTime(candleTime + CONFIG.intervalMs)}</strong>
+                {" · decision taken at the close"}
+              </>
+            ) : (
+              "no candle"
+            )}
           </span>
           <div style={{ fontSize: 16, fontWeight: 700, marginTop: 2 }}>
             {traded ? (
@@ -65,6 +87,12 @@ export default function EvaluationDetail({ candleTime, action, reason, details }
               <span className="muted">NO TRADE</span>
             )}
           </div>
+          {evaluatedAt && (
+            <div className="muted" style={{ fontSize: 12, marginTop: 2 }}>
+              evaluated at {fmtDateTime(evaluatedAt)}
+              {stale && " — scheduler is overdue, a newer candle may not have been checked yet"}
+            </div>
+          )}
         </div>
       </div>
 
@@ -105,11 +133,7 @@ export default function EvaluationDetail({ candleTime, action, reason, details }
               label="EMA21 crossover event"
               detail={crossoverDetail(g, details?.prev, details?.candle, ind)}
             />
-            <Gate
-              ok={g.rsiOk}
-              label="RSI filter"
-              detail={rsiDetail(g)}
-            />
+            <Gate ok={g.rsiOk} label="RSI filter" detail={rsiDetail(g)} />
             <Gate ok={g.flat} label="No open position" detail={g.flat ? "flat" : "already in a trade (max 1)"} />
             <Gate
               ok={g.notHalted}
@@ -120,11 +144,80 @@ export default function EvaluationDetail({ candleTime, action, reason, details }
         </>
       )}
 
+      {g && !traded && action !== "error" && (
+        <MissingConditions gates={g} details={details} />
+      )}
+
       {details?.exits && details.exits.length > 0 && (
         <p className="eval-reason" style={{ marginTop: 10 }}>
           <strong>Exits this cycle:</strong> {details.exits.join(" · ")}
         </p>
       )}
+    </>
+  );
+}
+
+/** Forward-looking: what has to change before a trade can happen. */
+function MissingConditions({ gates: g, details }: { gates: EvalGates; details: EvalDetails | null }) {
+  if (!g.warmedUp) return null;
+
+  const items: string[] = [];
+
+  if (!g.flat) {
+    items.push("The bot holds one position at a time — nothing new opens until the current one closes at its stop or target.");
+  } else if (!g.notHalted) {
+    items.push("The risk engine has halted new entries. It needs a manual reset before the bot can trade again.");
+  } else {
+    const close = details?.candle?.close;
+    const ema21 = details?.indicators?.ema21;
+    const side = g.allowedSide;
+
+    if (!g.crossoverOk && close !== undefined && ema21 !== null && ema21 !== undefined) {
+      const gap = close - ema21;
+      if (side === "long") {
+        items.push(
+          gap < 0
+            ? `Price must close ABOVE EMA21. Last close ${num(close)} was ${num(Math.abs(gap))} below EMA21 ${num(ema21)}, and it must cross from below — simply being above is not enough.`
+            : `Price is already above EMA21 (${num(ema21)}), so there is no crossing to trade. The bot waits for price to drop below and cross back up.`
+        );
+      } else if (side === "short") {
+        items.push(
+          gap > 0
+            ? `Price must close BELOW EMA21. Last close ${num(close)} was ${num(gap)} above EMA21 ${num(ema21)}, and it must cross from above.`
+            : `Price is already below EMA21 (${num(ema21)}), so there is no crossing to trade. The bot waits for price to rise above and cross back down.`
+        );
+      }
+    }
+
+    if (!g.rsiOk && g.rsi !== null) {
+      if (side === "long") {
+        items.push(
+          `RSI must rise above ${CONFIG.entry.rsiLongMin}. It was ${g.rsi.toFixed(1)} — ${(CONFIG.entry.rsiLongMin - g.rsi).toFixed(1)} points short.`
+        );
+      } else if (side === "short") {
+        items.push(
+          `RSI must fall below ${CONFIG.entry.rsiShortMax}. It was ${g.rsi.toFixed(1)} — ${(g.rsi - CONFIG.entry.rsiShortMax).toFixed(1)} points above.`
+        );
+      }
+    }
+  }
+
+  if (items.length === 0) return null;
+
+  return (
+    <>
+      <h3 className="gate-title">What would have to change</h3>
+      {g.flat && g.notHalted && g.allowedSide && (
+        <p className="eval-reason" style={{ marginTop: 0, marginBottom: 6 }}>
+          In the current {g.regime} regime the bot can only open a{" "}
+          <strong>{g.allowedSide.toUpperCase()}</strong>. For that, on some future 4h close:
+        </p>
+      )}
+      <ul className="missing-list">
+        {items.map((t) => (
+          <li key={t}>{t}</li>
+        ))}
+      </ul>
     </>
   );
 }
