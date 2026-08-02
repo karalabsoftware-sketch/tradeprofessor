@@ -72,7 +72,8 @@ describe("baseline variant matches the live engine", () => {
   // The whole point of the harness: if these ever diverge, backtest numbers
   // would describe a strategy the bot does not actually run.
   it("produces the same entry decision as decideEntry on every candle", () => {
-    const candles = synthetic(600);
+    // Must comfortably exceed CONFIG.minCandles or the loop below is empty.
+    const candles = synthetic(1400);
     const ctx = buildContext(candles);
 
     let checked = 0;
@@ -147,7 +148,7 @@ describe("lookahead guards", () => {
 });
 
 describe("simulate", () => {
-  const candles = synthetic(700);
+  const candles = synthetic(1400);
   const ctx = buildContext(candles);
   const range = { from: CONFIG.minCandles, to: candles.length };
 

@@ -4,7 +4,14 @@
  * they were produced under and results from different versions are never mixed.
  */
 
-export const STRATEGY_VERSION = "btc-4h-trend-v1.0.0";
+/**
+ * v1.0.1 — the trading RULES are unchanged from v1.0.0. Only the indicator
+ * warmup was fixed (see `fetchLimit`). The version is still bumped because the
+ * fix changes which regime the bot sees on roughly a third of candles, so
+ * decisions differ materially and results from the two versions must never be
+ * pooled.
+ */
+export const STRATEGY_VERSION = "btc-4h-trend-v1.0.1";
 
 export interface SymbolConfig {
   symbol: string;
@@ -24,10 +31,24 @@ export const CONFIG = {
   interval: "4h" as const,
   intervalMs: 4 * 60 * 60 * 1000,
 
-  /** Candles fetched per evaluation; must exceed minCandles for EMA200 warmup. */
-  fetchLimit: 320,
-  /** Minimum closed candles required before the engine will make decisions. */
-  minCandles: 300,
+  /**
+   * Candles fetched per evaluation. 1000 is Binance's per-request maximum.
+   *
+   * This is NOT a free parameter — it must be several times `emaSlow`. An EMA
+   * is seeded with an SMA of its first `period` values, and the seed's
+   * influence only decays as (1 - 2/(period+1))^n. The old value of 320 left
+   * EMA200 with just 120 update steps, so ~30% of the value was still the
+   * arbitrary seed: measured against a full-history EMA200 it was off by ~319
+   * points (0.5%), which flipped the bull/bear regime on 36% of recent
+   * candles. At 1000 candles EMA200 gets ~800 steps and the seed's influence
+   * falls below 0.05%. Guarded by a test in tests/warmup.test.ts.
+   */
+  fetchLimit: 1000,
+  /**
+   * Minimum closed candles required before the engine will decide anything.
+   * Sized to the same warmup requirement, not to a bare indicator minimum.
+   */
+  minCandles: 800,
 
   indicators: {
     emaFast: 21,

@@ -27,9 +27,19 @@ Postgres (Neon/Supabase free tier): candles · signals · trades · equity_snaps
 ```
 
 - **Strategy rules** live in one versioned config: [src/config/strategy.ts](src/config/strategy.ts)
-  (`btc-4h-trend-v1.0.0`). Every trade and signal stores the version; results
+  (`btc-4h-trend-v1.0.1`). Every trade and signal stores the version; results
   from different versions are never mixed. Changing any parameter requires a
   version bump.
+
+  > **v1.0.1** — trading rules identical to v1.0.0; only the indicator warmup
+  > was fixed. v1.0.0 fetched 320 candles, which left EMA200 with just 120
+  > update steps after its SMA seed, so ~30% of the value was still the seed.
+  > Measured against a full-history EMA200 it was off by ~319 points (0.5%),
+  > which **flipped the bull/bear regime on 36% of recent candles** — the
+  > strategy's primary directional gate. `fetchLimit` is now 1000 (Binance's
+  > per-request max), giving EMA200 ~800 steps and cutting the seed's
+  > influence below 0.05%. The version was bumped because decisions differ
+  > materially, so the two versions' results must never be pooled.
 - **Idempotent**: decisions key off the last *closed* candle's open time, so
   scheduler retries and a few minutes of GitHub cron drift are no-ops. A poll
   that finds nothing new updates a heartbeat (`bot_state.last_eval_at`) and
@@ -248,7 +258,7 @@ exclude the current candle, entries fill at the signal candle's close with
 exits checked from the next candle, and trailing stops move only after the
 candle they derive from has closed. Tests cover each of these.
 
-## Strategy (v1.0.0 — exact rules)
+## Strategy (v1.0.1 — exact rules)
 
 - BTCUSDT 4h (ETH/SOL implemented, disabled by config flag). Indicators on 4h
   closes: EMA21, EMA50, EMA200, RSI14 (Wilder), ATR14 (Wilder).
@@ -278,7 +288,7 @@ src/components/EvaluationDetail.tsx  per-evaluation gate checklist ("why no trad
 src/components/PriceChart.tsx        4h candles + EMA21/50/200 + RSI panel (hand-rolled SVG)
 src/app/api/cron/evaluate     scheduler endpoint (Bearer CRON_SECRET)
 src/app/api/admin/reset-halt  manual halt reset (Bearer ADMIN_SECRET)
-scripts/seed.ts               backfill 400 candles + init flat state
+scripts/seed.ts               backfill CONFIG.fetchLimit candles + init flat state
 scripts/backtest.ts           variant comparison with train/holdout split (read-only)
 src/backtest/                 simulator, variants, history loading — shares src/lib/fills.ts
 .github/workflows/trigger.yml 4h scheduler

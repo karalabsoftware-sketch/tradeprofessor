@@ -19,7 +19,9 @@ import { CONFIG, STRATEGY_VERSION } from "../src/config/strategy";
 import { closedCandles, fetchKlines } from "../src/lib/binance";
 import { atr, ema, rsi } from "../src/lib/indicators";
 
-const SEED_CANDLES = 400;
+/** Matches CONFIG.fetchLimit so a fresh install starts with the same warmup
+ *  depth the engine uses (and gives the dashboard chart real history). */
+const SEED_CANDLES = CONFIG.fetchLimit;
 
 async function main() {
   const url = process.env.DATABASE_URL;
