@@ -69,7 +69,7 @@ export default async function Dashboard() {
             : `No successful run for ${formatAge(health.ageMs)} (expected roughly hourly).`}{" "}
           Stops and targets are still replayed across every missed candle, but an
           entry signal on a candle that was skipped over is not backfilled — check
-          the GitHub Actions tab.
+          the scheduler&apos;s execution history.
         </div>
       )}
       {state.halted && (

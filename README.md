@@ -11,7 +11,7 @@ Paper trading is the out-of-sample validation phase: the target is **90 days or
 ## How it works
 
 ```
-GitHub Actions (cron: 23 * * * *  — hourly poll)
+External scheduler (cron-job.org, hourly at :23)   [+ GitHub Actions as backup]
         │  POST /api/cron/evaluate  (Authorization: Bearer CRON_SECRET)
         ▼
 Vercel (Next.js App Router, Node runtime, <10s)
@@ -35,13 +35,12 @@ Postgres (Neon/Supabase free tier): candles · signals · trades · equity_snaps
   that finds nothing new updates a heartbeat (`bot_state.last_eval_at`) and
   writes no signal row, which is what the dashboard's "scheduler down"
   indicator watches.
-- **Hourly polling for a 4h strategy**: GitHub's scheduler drops and delays
-  runs, so the workflow polls hourly instead of every 4h. This cannot change a
-  trade — decisions are still made only on closed 4h candles — it just means a
-  dropped run heals within an hour instead of costing a full cycle. Public
-  repos get unlimited free Actions minutes, so the extra polls cost nothing.
-  Caveat: stops/targets are replayed across every missed candle, but an entry
-  signal on a candle the bot skipped over is **not** backfilled.
+- **Hourly polling for a 4h strategy**: the scheduler polls hourly rather than
+  every 4h. This cannot change a trade — decisions are still made only on
+  closed 4h candles — it just means a dropped run heals within an hour instead
+  of costing a full cycle. Caveat: stops/targets are replayed across every
+  missed candle, but an entry signal on a candle the bot skipped over is
+  **not** backfilled, which is why trigger reliability matters.
 - **Every decision is auditable**: each evaluation stores the candle, all
   indicator values, the previous candle's close/EMA21 (so the crossover check
   can be re-verified independently) and a gate-by-gate pass/fail breakdown.
@@ -125,17 +124,45 @@ curl -X POST -H "Authorization: Bearer $CRON_SECRET" http://localhost:3000/api/c
 > Deliberately **no `vercel.json` crons**: Hobby allows only one cron/day and
 > the deploy would fail with a 4h schedule. Scheduling lives in GitHub Actions.
 
-### 5. Scheduler (GitHub Actions)
+### 5. Scheduler (cron-job.org)
 
-[.github/workflows/trigger.yml](.github/workflows/trigger.yml) calls the
-endpoint hourly at :23 past the hour. Minute 23 avoids the top-of-hour
-congestion window where GitHub is most likely to delay or drop scheduled runs.
+The bot does nothing unless something calls `POST /api/cron/evaluate` on a
+schedule. **This is the single most failure-prone part of the system**, so it
+is worth setting up carefully and verifying.
 
-> Note: GitHub's scheduled triggers are best-effort and can be delayed by
-> tens of minutes or skipped entirely — a newly pushed schedule may also take
-> a while to register. That unreliability is exactly why the poll is hourly
-> rather than every 4h. If runs stop entirely, the dashboard shows a
-> "scheduler looks down" banner based on the heartbeat.
+> **Why not GitHub Actions?** This project originally used a GitHub Actions
+> `schedule:` trigger. Across two different cron expressions it fired **zero**
+> times over many hours, while every `workflow_dispatch` succeeded — Actions
+> was enabled, the workflow `active`, the YAML valid, the file on the default
+> branch, the repo public. GitHub's scheduled triggers are explicitly
+> best-effort and are dropped under load. The workflow is kept as harmless
+> backup; the real trigger is external.
+
+Set up at [cron-job.org](https://cron-job.org) (free, supports custom headers):
+
+1. Create an account and click **Create cronjob**.
+2. **URL**: `https://<your-app>.vercel.app/api/cron/evaluate`
+3. **Schedule**: every hour at minute **23**. (Any minute works, but the
+   dashboard's "Next check" is computed from `CONFIG.schedule.pollMinute`,
+   which is 23 — change one or the other to keep them consistent.)
+4. Expand **Advanced** →
+   - **Request method**: `POST`
+   - **Headers**: add `Authorization` with value `Bearer <your CRON_SECRET>`
+     (the exact value from the Vercel env var — anything else gets a 401)
+5. Enable **Save responses** so failures are diagnosable, then **Create**.
+6. Hit **Test run** once. A healthy response is HTTP 200 with a JSON body like
+   `{"ok":true,...}`. HTTP 401 means the header is wrong.
+
+Why hourly for a 4h strategy: decisions are only ever taken on closed 4h
+candles, so polling more often cannot change a single trade. It just means a
+dropped run heals within an hour instead of costing a full 4h cycle. Polls
+that find nothing new update a heartbeat and write no log row.
+
+**Verifying it works**: the dashboard's *Bot status* panel shows *Last
+successful run* with an age. If nothing runs for 2.5 hours the page shows a
+"Scheduler looks down" banner. That banner is the thing to watch — a bot that
+is never triggered looks exactly like a bot that keeps deciding not to trade,
+which is precisely the failure this project hit.
 
 In the GitHub repo: **Settings → Secrets and variables → Actions → New
 repository secret**:

@@ -1,18 +1,20 @@
-# Triggers the paper-trading evaluation.
-# Vercel Hobby crons are limited to once/day, so scheduling lives here instead.
+# BACKUP trigger for the paper-trading evaluation.
+#
+# The PRIMARY scheduler is external (cron-job.org) — see README "Scheduler".
+# GitHub's scheduled trigger proved unreliable for this repo: across two
+# different cron expressions it fired ZERO times while every manual dispatch
+# succeeded, so it cannot be trusted as the only trigger.
+#
+# This workflow is kept because it costs nothing (public repos get unlimited
+# Actions minutes) and the endpoint is idempotent per candle — if GitHub ever
+# does fire, it is harmless redundancy rather than a double evaluation.
 #
 # Required repo secrets (Settings > Secrets and variables > Actions):
 #   CRON_SECRET   — same value as the Vercel env var of the same name
 #   EVALUATE_URL  — https://<your-app>.vercel.app/api/cron/evaluate
 #
-# Why hourly for a 4h strategy: GitHub's scheduler drops and delays runs,
-# especially near the top of the hour. The endpoint only ever acts on the last
-# CLOSED 4h candle and replays every candle since the previous run, so polling
-# hourly cannot change a single trade — it just means a dropped run heals on
-# the next attempt instead of costing a full 4h cycle. Public repos get
-# unlimited free Actions minutes, so the extra runs cost nothing.
-#
-# Minute 23 deliberately avoids the :00-:10 congestion window.
+# Minute 23 deliberately avoids the :00-:10 congestion window and matches
+# CONFIG.schedule.pollMinute, which the dashboard uses for "Next check".
 
 name: papertrade-evaluate
 
