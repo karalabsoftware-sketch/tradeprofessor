@@ -9,7 +9,8 @@
     "start": "next start",
     "test": "vitest run",
     "seed": "tsx scripts/seed.ts",
-    "backtest": "tsx scripts/backtest.ts"
+    "backtest": "tsx scripts/backtest.ts",
+    "optimize": "tsx scripts/optimize.ts"
   },
   "dependencies": {
     "next": "^14.2.35",

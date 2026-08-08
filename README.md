@@ -16,10 +16,13 @@ that is a venue constraint, not a tuning choice. Stop fills are gap-aware —
 a bar that opens past the stop fills at the open, which matters for equities
 that gap overnight.
 
-> **No per-instrument tuning.** The same rules run everywhere. We measured the
-> baseline across ten crypto symbols and per-symbol results were uncorrelated
-> between the training and holdout halves (ADA 0.75 → 1.45, DOT 1.26 → 0.43),
-> so fitting parameters per instrument would be fitting noise.
+> **No per-instrument tuning — and it was tested, not assumed.** See
+> [Per-instrument study](#per-instrument-study) below: a 45-cell grid was
+> searched per instrument on the training half and judged on the holdout.
+> Tuning beat shared parameters on 8 of 11 instruments, which sounds like a
+> result until you run the binomial test (p ≈ 0.11 — not significant), and the
+> tuned portfolio still lost money. What the grid actually found was a
+> *shared* direction, not instrument-specific settings.
 
 
 
@@ -280,6 +283,57 @@ a 4h candle uses only daily candles that had already closed, Donchian windows
 exclude the current candle, entries fill at the signal candle's close with
 exits checked from the next candle, and trailing stops move only after the
 candle they derive from has closed. Tests cover each of these.
+
+## Per-instrument study
+
+```bash
+npm run optimize
+```
+
+Read-only. Searches a 45-cell grid (stop multiple × RR × dead-band width) on
+each instrument's **training** half, locks the winner in, then judges it on the
+**holdout** half against the shared baseline. The question is not "what are the
+best parameters for X" — a grid always answers that — but "does per-instrument
+tuning survive out of sample?"
+
+Result (2026-08-08, 495 fitted choices):
+
+| | Baseline | Per-instrument tuned |
+|---|---|---|
+| Mean holdout profit factor | 0.834 | 0.893 |
+| Instruments improved out of sample | — | 8 / 11 |
+| Total holdout net (each on own $10k) | −$3,980 | −$56 |
+
+8 of 11 looks convincing until you test it: under the null hypothesis, P(≥8 of
+11) = 0.11. Not significant. And the tuned portfolio still lost.
+
+**What the grid did find was a shared direction.** It independently chose a
+wider stop on 6 of 11 instruments (3.5×ATR rather than 2.5) and a bigger target
+on 5 of 11 (1:4 rather than 1:3). Testing that as ONE shared change — no
+per-instrument fitting — across all instruments and both halves:
+
+| Shared params | Mean holdout PF | Holdout PF > 1 | Holdout net |
+|---|---|---|---|
+| 2.5×ATR, 1:3 (current) | 0.834 | 2 / 11 | −$3,980 |
+| 3.5×ATR, 1:3 | 0.838 | 5 / 11 | −$2,712 |
+| 2.5×ATR, 1:4 | 0.828 | 5 / 11 | −$4,010 |
+| **3.5×ATR, 1:4** | **0.869** | 5 / 11 | **+$653** |
+
+On crypto specifically, 3.5×ATR / 1:4 improves in *both* halves for BTC
+(1.30→1.65 train, 1.22→1.54 holdout), ETH, SOL and HBAR. Two independent
+procedures — a per-instrument grid and a shared-parameter sweep — pointed the
+same way, which is stronger evidence than either alone. The plausible mechanism
+is that a 2.5×ATR stop sits inside normal noise and gets taken out before the
+move develops.
+
+**US equities failed under every configuration tested** — 1h and daily bars,
+all four parameter sets. On 1h their *training* profit factors are mostly below
+1.0, so it is not even overfitting; the rules simply do not transfer. On daily
+bars training looks excellent (NVDA 2.64, META 1.91) and the holdout collapses
+(0.57, 0.64) on 8–15 trades.
+
+None of this has been applied to the live bot. Changing it requires editing
+`src/config/strategy.ts` and bumping the version.
 
 ## Strategy (v1.0.1 — exact rules)
 
