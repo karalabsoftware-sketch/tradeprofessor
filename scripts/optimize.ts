@@ -22,7 +22,7 @@ import { fetchHistory } from "../src/backtest/history";
 import { buildContext, simulate, BacktestResult } from "../src/backtest/simulate";
 import { BASELINE, Variant } from "../src/backtest/variants";
 import { CONFIG } from "../src/config/strategy";
-import { enabledInstruments, Instrument } from "../src/config/instruments";
+import { enabledInstruments, Instrument, intervalOf } from "../src/config/instruments";
 import { fetchCandles, Candle } from "../src/lib/marketdata";
 
 /** Small on purpose: every extra cell makes the winner more likely to be luck. */
@@ -61,7 +61,7 @@ function gridVariants(): Variant[] {
 async function history(inst: Instrument): Promise<Candle[]> {
   // Binance pages backwards for real depth; Yahoo caps intraday at ~2 years.
   return inst.provider === "binance"
-    ? fetchHistory(inst.providerSymbol, inst.interval, CRYPTO_BARS)
+    ? fetchHistory(inst.providerSymbol, intervalOf(inst), CRYPTO_BARS)
     : fetchCandles(inst, EQUITY_BARS);
 }
 

@@ -6,15 +6,23 @@ Capital is finite and shared: when it is fully deployed, a valid signal is
 recorded as a **missed opportunity** rather than taken — measuring what a fixed
 budget costs is one of the goals, not a side effect.
 
-| Venue | Instruments |
-|---|---|
-| Crypto (4h) | BTC, ETH, SOL, XRP, SUI, HBAR |
-| US stocks (1h) | AAPL, AMZN, INTC, META, NVDA, SPCX |
+| Venue | Bars | Direction | Instruments |
+|---|---|---|---|
+| Crypto | 4h | long + short | BTC, ETH, SOL, XRP, SUI, HBAR |
+| US stocks | 1d | **long only** | AAPL, AMZN, INTC, META, NVDA, SPCX |
 
-US equities use 1h bars because a 6.5-hour session does not divide into 4h;
-that is a venue constraint, not a tuning choice. Stop fills are gap-aware —
-a bar that opens past the stop fills at the open, which matters for equities
-that gap overnight.
+The two venue settings are the *only* differences, and each was measured
+rather than assumed (see [Per-instrument study](#per-instrument-study)):
+
+- **Bars.** A 6.5-hour session does not divide into 4h. Across the five
+  stocks, daily beat hourly in every configuration tested — long-only
+  3.5×ATR/1:4 scored holdout PF **0.64 on 1h vs 1.51 on 1d**.
+- **Direction.** Equity prices drift upward, so shorting single names fights
+  that drift. Skipping shorts improved the holdout in all four paired
+  comparisons (1d 2.5×/1:3: 0.79 → 1.06; 1d 3.5×/1:4: 0.99 → 1.51).
+
+Stop fills are gap-aware — a bar that opens past the stop fills at the open,
+which matters for equities that gap overnight.
 
 > **No per-instrument tuning — and it was tested, not assumed.** See
 > [Per-instrument study](#per-instrument-study) below: a 45-cell grid was
@@ -335,21 +343,40 @@ bars training looks excellent (NVDA 2.64, META 1.91) and the holdout collapses
 None of this has been applied to the live bot. Changing it requires editing
 `src/config/strategy.ts` and bumping the version.
 
-## Strategy (v1.0.1 — exact rules)
+## Strategy (v1.2.0 — exact rules)
 
-- BTCUSDT 4h (ETH/SOL implemented, disabled by config flag). Indicators on 4h
-  closes: EMA21, EMA50, EMA200, RSI14 (Wilder), ATR14 (Wilder).
-- Regime: EMA50>EMA200 → longs only; EMA50<EMA200 → shorts only.
+> **v1.2.0** widened the stop from 2.5×ATR to **3.5×ATR** and the target from
+> 1:3 to **1:4**, on every instrument. Two independent procedures found it: a
+> per-instrument grid picked a wider stop on 6 of 11 instruments, and testing
+> it as a single *shared* change turned the holdout total from −$3,980 to
+> **+$653**, improving in both halves for BTC, ETH, SOL and HBAR. A wider stop
+> does not raise risk — position size is derived from the stop distance, so a
+> wider stop simply buys less and ties up less of the shared account. The
+> plausible mechanism is that a 2.5×ATR stop sits inside normal noise and is
+> taken out before the move develops.
+
+Identical indicators and entry logic on every instrument. Only bar length and
+allowed direction vary by venue (see the table at the top).
+
+- Indicators on each instrument's own closes: EMA21, EMA50, EMA200, RSI14
+  (Wilder), ATR14 (Wilder).
+- Regime: EMA50>EMA200 → longs only; EMA50<EMA200 → shorts only. On a
+  long-only venue a bear regime means stand aside, not short.
 - Entry LONG: close crosses **above** EMA21 (event, not level) AND RSI14>52 AND
   bull regime AND flat. Entry SHORT: mirrored with RSI14<48 and bear regime.
 - Dead band: no trades while 48 ≤ RSI ≤ 52.
-- Stop: entry ∓ 2.5×ATR14; target 3× the stop distance (1:3 RR); max 1 open
-  position; regime flip force-closes at the next evaluation.
-- Size: `qty = (equity × 0.015) / (2.5 × ATR14)` — 1.5% risk per trade. Note:
-  in very low-volatility regimes this formula can imply notional > equity
-  (paper leverage); it is applied exactly as specified.
+- Stop: entry ∓ 3.5×ATR14; target 4× the stop distance (1:4 RR); one position
+  per instrument; regime flip force-closes at the next evaluation.
+- Size: `qty = (equity × 0.015) / (3.5 × ATR14)` — 1.5% of the **shared**
+  account risked per trade, so a volatile instrument automatically takes a
+  smaller position than a calm one.
+- Capital: one shared $10,000. A signal is taken only if its notional fits the
+  free balance; otherwise it is recorded in `missed_opportunities`.
 - Risk engine halts new entries on: daily realized loss ≥4%, 6 consecutive
-  losses, or ≥10% drawdown from peak equity.
+  losses, or ≥10% drawdown from peak equity. **Note:** these thresholds were
+  designed for a single instrument. With eleven trading at once, six
+  consecutive losses across the whole account will occur far more often, so
+  they are due a review once real halt data exists.
 
 ## Project layout
 

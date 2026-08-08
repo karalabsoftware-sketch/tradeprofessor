@@ -34,6 +34,14 @@ CREATE TABLE IF NOT EXISTS instrument_state (
   updated_at       timestamptz NOT NULL DEFAULT now()
 );
 
+-- Which bar length the stored candles and last_candle_time belong to.
+-- Changing a venue's timeframe invalidates both: daily bars carry different
+-- open times than hourly ones, so a stale marker would make the engine think
+-- every new bar had already been evaluated, and mixing the two in `candles`
+-- would corrupt every indicator drawn from the table. The seed detects a
+-- mismatch here and rebuilds that instrument.
+ALTER TABLE instrument_state ADD COLUMN IF NOT EXISTS interval text;
+
 -- Existing trades/signals/candles tables gain an instrument dimension.
 ALTER TABLE trades  ADD COLUMN IF NOT EXISTS instrument_id text;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS instrument_id text;

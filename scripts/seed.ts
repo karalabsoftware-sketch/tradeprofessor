@@ -16,7 +16,7 @@ import { readFileSync } from "node:fs";
 import { join } from "node:path";
 import postgres from "postgres";
 import { CONFIG, STRATEGY_VERSION } from "../src/config/strategy";
-import { enabledInstruments } from "../src/config/instruments";
+import { enabledInstruments, intervalOf, intervalMsOf } from "../src/config/instruments";
 import { fetchCandles, closedOnly } from "../src/lib/marketdata";
 import { atr, ema, rsi } from "../src/lib/indicators";
 
@@ -39,6 +39,35 @@ async function main() {
 
   for (const inst of instruments) {
     try {
+      const interval = intervalOf(inst);
+
+      // If this instrument's bar length changed, the stored candles and the
+      // last-evaluated marker belong to the old timeframe and are worse than
+      // useless — mixed bar lengths corrupt every indicator, and a stale
+      // marker can be *ahead* of the new bars' open times, freezing the
+      // instrument permanently. Rebuild rather than merge.
+      //
+      // The check reads the ACTUAL spacing of stored bars rather than a
+      // recorded label, so it also repairs rows written before that label
+      // existed, and cannot be fooled by a mislabelled one.
+      const spacing = await sql<{ gap: string | null }[]>`
+        SELECT min(diff)::bigint AS gap FROM (
+          SELECT open_time - lag(open_time) OVER (ORDER BY open_time) AS diff
+          FROM (SELECT open_time FROM candles WHERE symbol = ${inst.id}
+                ORDER BY open_time DESC LIMIT 60) recent
+        ) gaps WHERE diff > 0`;
+      const observedGap = spacing[0]?.gap === null || spacing[0]?.gap === undefined
+        ? null
+        : Number(spacing[0].gap);
+
+      if (observedGap !== null && observedGap !== intervalMsOf(inst)) {
+        await sql`DELETE FROM candles WHERE symbol = ${inst.id}`;
+        await sql`UPDATE instrument_state SET last_candle_time = NULL WHERE instrument_id = ${inst.id}`;
+        console.log(
+          `  ${inst.id.padEnd(9)} stored bars were ${(observedGap / 3600000).toFixed(0)}h apart, expected ${interval} — cleared and rebuilding`
+        );
+      }
+
       const all = await fetchCandles(inst, CONFIG.fetchLimit);
       const closed = closedOnly(all, Date.now());
 
@@ -70,13 +99,14 @@ async function main() {
       }
 
       await sql`
-        INSERT INTO instrument_state (instrument_id, warming_up, candles_seen, updated_at)
-        VALUES (${inst.id}, ${!enough}, ${closed.length}, now())
+        INSERT INTO instrument_state (instrument_id, warming_up, candles_seen, interval, updated_at)
+        VALUES (${inst.id}, ${!enough}, ${closed.length}, ${interval}, now())
         ON CONFLICT (instrument_id) DO UPDATE SET
-          warming_up = ${!enough}, candles_seen = ${closed.length}, updated_at = now()
+          warming_up = ${!enough}, candles_seen = ${closed.length},
+          interval = ${interval}, updated_at = now()
       `;
 
-      console.log(`  ${inst.id.padEnd(9)} ${inst.venue.padEnd(10)} ${String(closed.length).padStart(5)} bars  ${detail}`);
+      console.log(`  ${inst.id.padEnd(9)} ${inst.venue.padEnd(10)} ${interval.padEnd(3)} ${String(closed.length).padStart(5)} bars  ${detail}`);
     } catch (err) {
       console.log(`  ${inst.id.padEnd(9)} FAILED: ${err instanceof Error ? err.message : String(err)}`);
     }

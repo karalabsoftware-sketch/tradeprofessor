@@ -21,6 +21,13 @@ export interface Variant {
   rsiShortMax: number;
   /** Which series decides long-only vs short-only. */
   regime: "4h" | "1d" | "none";
+  /**
+   * Direction limits applied ON TOP of the regime filter. Equity indices
+   * drift upward over time, so shorting individual stocks fights that drift;
+   * `allowShort: false` tests whether skipping shorts entirely helps.
+   */
+  allowLong: boolean;
+  allowShort: boolean;
   stopAtrMult: number;
   /** Fixed target as a multiple of stop distance; null = no fixed target. */
   rrMultiple: number | null;
@@ -37,6 +44,8 @@ export const BASELINE: Variant = {
   rsiLongMin: CONFIG.entry.rsiLongMin,
   rsiShortMax: CONFIG.entry.rsiShortMax,
   regime: "4h",
+  allowLong: true,
+  allowShort: true,
   stopAtrMult: CONFIG.exits.stopAtrMult,
   rrMultiple: CONFIG.exits.rrMultiple,
   trailingAtrMult: null,
@@ -84,6 +93,8 @@ export const VARIANTS: Variant[] = [
     rsiLongMin: CONFIG.entry.rsiLongMin,
     rsiShortMax: CONFIG.entry.rsiShortMax,
     regime: "4h",
+    allowLong: true,
+    allowShort: true,
     stopAtrMult: CONFIG.exits.stopAtrMult,
     rrMultiple: CONFIG.exits.rrMultiple,
     trailingAtrMult: null,
@@ -97,6 +108,8 @@ export const VARIANTS: Variant[] = [
     rsiLongMin: CONFIG.entry.rsiLongMin,
     rsiShortMax: CONFIG.entry.rsiShortMax,
     regime: "4h",
+    allowLong: true,
+    allowShort: true,
     stopAtrMult: CONFIG.exits.stopAtrMult,
     rrMultiple: null,
     trailingAtrMult: 3,

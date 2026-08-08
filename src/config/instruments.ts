@@ -9,7 +9,9 @@
  * dictated by the venue rather than chosen for performance.
  */
 
-export type Venue = "crypto" | "us-equity";
+import { VENUE_RULES, VenueKey } from "./strategy";
+
+export type Venue = VenueKey;
 export type Provider = "binance" | "yahoo";
 
 export interface Instrument {
@@ -20,50 +22,47 @@ export interface Instrument {
   provider: Provider;
   /** Symbol as the provider spells it. */
   providerSymbol: string;
-  interval: string;
-  intervalMs: number;
   enabled: boolean;
   /** Shown on the dashboard when the instrument cannot trade yet. */
   note?: string;
 }
 
-const H = 60 * 60 * 1000;
+/** Bar length comes from the venue, never from the individual instrument. */
+export function intervalOf(inst: Instrument): string {
+  return VENUE_RULES[inst.venue].interval;
+}
+export function intervalMsOf(inst: Instrument): number {
+  return VENUE_RULES[inst.venue].intervalMs;
+}
 
-/**
- * Crypto trades 24/7, so 4h bars line up with the clock and the strategy that
- * was validated on them.
- *
- * US equities trade 6.5h a day, which no 4h grid divides sensibly, so they use
- * 1h bars. That is a venue constraint, not a tuning decision.
- */
 export const INSTRUMENTS: Instrument[] = [
-  // ---- crypto (Binance, 4h) ----
-  { id: "BTCUSDT", label: "Bitcoin", venue: "crypto", provider: "binance", providerSymbol: "BTCUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
-  { id: "ETHUSDT", label: "Ethereum", venue: "crypto", provider: "binance", providerSymbol: "ETHUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
-  { id: "SOLUSDT", label: "Solana", venue: "crypto", provider: "binance", providerSymbol: "SOLUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
-  { id: "XRPUSDT", label: "XRP", venue: "crypto", provider: "binance", providerSymbol: "XRPUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
-  { id: "SUIUSDT", label: "Sui", venue: "crypto", provider: "binance", providerSymbol: "SUIUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
-  { id: "HBARUSDT", label: "Hedera", venue: "crypto", provider: "binance", providerSymbol: "HBARUSDT", interval: "4h", intervalMs: 4 * H, enabled: true },
+  // ---- crypto (Binance, 4h bars, long + short) ----
+  { id: "BTCUSDT", label: "Bitcoin", venue: "crypto", provider: "binance", providerSymbol: "BTCUSDT", enabled: true },
+  { id: "ETHUSDT", label: "Ethereum", venue: "crypto", provider: "binance", providerSymbol: "ETHUSDT", enabled: true },
+  { id: "SOLUSDT", label: "Solana", venue: "crypto", provider: "binance", providerSymbol: "SOLUSDT", enabled: true },
+  { id: "XRPUSDT", label: "XRP", venue: "crypto", provider: "binance", providerSymbol: "XRPUSDT", enabled: true },
+  { id: "SUIUSDT", label: "Sui", venue: "crypto", provider: "binance", providerSymbol: "SUIUSDT", enabled: true },
+  { id: "HBARUSDT", label: "Hedera", venue: "crypto", provider: "binance", providerSymbol: "HBARUSDT", enabled: true },
 
-  // ---- US equities (Yahoo, 1h) ----
-  { id: "AAPL", label: "Apple", venue: "us-equity", provider: "yahoo", providerSymbol: "AAPL", interval: "1h", intervalMs: H, enabled: true },
-  { id: "AMZN", label: "Amazon", venue: "us-equity", provider: "yahoo", providerSymbol: "AMZN", interval: "1h", intervalMs: H, enabled: true },
-  { id: "INTC", label: "Intel", venue: "us-equity", provider: "yahoo", providerSymbol: "INTC", interval: "1h", intervalMs: H, enabled: true },
-  { id: "META", label: "Meta", venue: "us-equity", provider: "yahoo", providerSymbol: "META", interval: "1h", intervalMs: H, enabled: true },
-  { id: "NVDA", label: "NVIDIA", venue: "us-equity", provider: "yahoo", providerSymbol: "NVDA", interval: "1h", intervalMs: H, enabled: true },
+  // ---- US equities (Yahoo, daily bars, long only) ----
+  { id: "AAPL", label: "Apple", venue: "us-equity", provider: "yahoo", providerSymbol: "AAPL", enabled: true },
+  { id: "AMZN", label: "Amazon", venue: "us-equity", provider: "yahoo", providerSymbol: "AMZN", enabled: true },
+  { id: "INTC", label: "Intel", venue: "us-equity", provider: "yahoo", providerSymbol: "INTC", enabled: true },
+  { id: "META", label: "Meta", venue: "us-equity", provider: "yahoo", providerSymbol: "META", enabled: true },
+  { id: "NVDA", label: "NVIDIA", venue: "us-equity", provider: "yahoo", providerSymbol: "NVDA", enabled: true },
   {
     id: "SPCX",
     label: "SpaceX",
     venue: "us-equity",
     provider: "yahoo",
     providerSymbol: "SPCX",
-    interval: "1h",
-    intervalMs: H,
     enabled: true,
-    // Listed 2026-06-12. EMA200 needs ~800 bars of warmup and at ~7 bars per
-    // trading day that lands around November 2026. The engine refuses to
-    // decide before then, so it simply sits idle — no special-casing needed.
-    note: "Listed June 2026 — collecting history for EMA200 warmup, cannot trade yet",
+    // Listed 2026-06-12. On daily bars EMA200 needs ~800 trading days of
+    // history, so this one sits idle for years rather than months. That is
+    // not a bug to work around: a 200-day trend cannot be computed for a
+    // stock that has not traded 200 days. The existing warmup guard handles
+    // it with no special-casing.
+    note: "Listed June 2026 — a 200-day trend needs ~800 trading days of history, so it stays idle until roughly 2029",
   },
 ];
 

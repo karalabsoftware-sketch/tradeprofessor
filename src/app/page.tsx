@@ -4,9 +4,12 @@ import {
   instrumentById,
   instrumentsByVenue,
   enabledInstruments,
+  intervalOf,
+  intervalMsOf,
   Venue,
   VENUE_LABELS,
 } from "@/config/instruments";
+import { VENUE_RULES } from "@/config/strategy";
 import { db } from "@/lib/db";
 import { computeMetrics, formatAge, nextPoll, schedulerHealth } from "@/lib/metrics";
 import { fmtDateTime, tzLabel } from "@/lib/format";
@@ -170,7 +173,11 @@ export default async function Dashboard({
             <div>
               <h2 style={{ marginBottom: 2 }}>{VENUE_LABELS[inst.venue]}</h2>
               <div className="inst-title">
-                {inst.label} <span className="muted">· {inst.id} · {inst.interval}</span>
+                {inst.label}{" "}
+                <span className="muted">
+                  · {inst.id} · {intervalOf(inst)} bars ·{" "}
+                  {VENUE_RULES[inst.venue].allowShort ? "long + short" : "long only"}
+                </span>
               </div>
             </div>
             <div className="inst-pos">
@@ -209,8 +216,8 @@ export default async function Dashboard({
                   details={latest.details}
                   evaluatedAt={latest.created_at}
                   stale={health.stale}
-                  intervalMs={inst.intervalMs}
-                  intervalLabel={inst.interval}
+                  intervalMs={intervalMsOf(inst)}
+                  intervalLabel={intervalOf(inst)}
                 />
               ) : (
                 <p className="muted" style={{ fontSize: 13 }}>No evaluation recorded yet for {inst.id}.</p>
@@ -218,7 +225,7 @@ export default async function Dashboard({
             </section>
 
             <section className="card span-12">
-              <h2>{inst.label} {inst.interval} — the same indicators the bot decides on</h2>
+              <h2>{inst.label} {intervalOf(inst)} — the same indicators the bot decides on</h2>
               <PriceChart
                 points={priceSeries.slice(-CHART_CANDLES)}
                 markers={markers}
@@ -350,11 +357,13 @@ export default async function Dashboard({
         <section className="card span-12">
           <h2>Strategy — identical rules on every instrument ({STRATEGY_VERSION})</h2>
           <ul className="rules">
-            <li>Indicators on each instrument&apos;s own bars: <code>EMA21</code>, <code>EMA50</code>, <code>EMA200</code>, <code>RSI14</code>, <code>ATR14</code>. Crypto uses 4h bars; US stocks use 1h, because a 6.5-hour session does not divide into 4h.</li>
-            <li>Regime: <code>EMA50 &gt; EMA200</code> → longs only; <code>EMA50 &lt; EMA200</code> → shorts only.</li>
+            <li>Indicators on each instrument&apos;s own bars: <code>EMA21</code>, <code>EMA50</code>, <code>EMA200</code>, <code>RSI14</code>, <code>ATR14</code>. Identical entry rule everywhere — only two venue-level settings differ, each forced by market structure rather than chosen for performance.</li>
+            <li><strong>Crypto:</strong> <code>4h</code> bars, long <em>and</em> short. Trades 24/7, so a 4h grid lines up with the clock.</li>
+            <li><strong>US stocks:</strong> <code>1d</code> bars, <strong>long only</strong>. A 6.5-hour session does not divide into 4h, and equities drift upward over time, so shorting single names fights that drift — measured, daily beat hourly and long-only beat long+short in every paired comparison.</li>
+            <li>Regime: <code>EMA50 &gt; EMA200</code> → longs only; <code>EMA50 &lt; EMA200</code> → shorts only (US stocks simply stand aside instead).</li>
             <li>Entry LONG: close crosses <em>above</em> EMA21 AND <code>RSI14 &gt; 52</code> AND bull regime. SHORT mirrors it with <code>RSI14 &lt; 48</code>.</li>
             <li>Dead band: no trades while <code>48 ≤ RSI ≤ 52</code>.</li>
-            <li>Stop: entry ∓ <code>2.5 × ATR14</code>. Target: 3× the stop distance. One position per instrument.</li>
+            <li>Stop: entry ∓ <code>3.5 × ATR14</code>. Target: 4× the stop distance. One position per instrument. A tighter 2.5× stop sat inside normal noise and was taken out before moves developed.</li>
             <li>Size: <code>qty = (equity × 0.015) / (2.5 × ATR14)</code> — 1.5% of the shared account risked per trade, so a volatile instrument automatically gets a smaller position than a calm one.</li>
             <li>Capital: one shared {usd(CONFIG.account.startingEquity)}. A signal is only taken if its notional fits the free balance; otherwise it is logged as missed.</li>
             <li>Fills: entry at bar close + 0.05% slippage against the trade; if a bar touches both stop and target the stop is assumed first; a bar that <em>gaps</em> past the stop fills at the open, not the stop; 0.1% fee per fill.</li>

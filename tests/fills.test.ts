@@ -1,34 +1,62 @@
 import { describe, expect, it } from "vitest";
 import { CONFIG } from "../src/config/strategy";
-import { checkPriceExit, forcedExitPrice, planEntry, settleClose } from "../src/lib/fills";
+import {
+  checkPriceExit,
+  DEFAULT_FILL_PARAMS,
+  forcedExitPrice,
+  planEntry,
+  settleClose,
+} from "../src/lib/fills";
 import { decideEntry } from "../src/lib/engine";
 
 const SLIP = CONFIG.fills.slippagePct; // 0.0005
 const FEE = CONFIG.fills.feePct; // 0.001
+// Read from config rather than hardcoded: these moved in v1.2.0 (2.5 -> 3.5,
+// 1:3 -> 1:4) and a test that pins them tests the config, not the maths.
+const STOP_MULT = CONFIG.exits.stopAtrMult;
+const RR = CONFIG.exits.rrMultiple;
+const RISK = CONFIG.sizing.riskPerTrade;
 
 describe("planEntry", () => {
-  it("long: slippage against direction, 2.5*ATR stop, 1:3 RR, 1.5% risk sizing", () => {
+  it("long: slippage against direction, ATR-scaled stop, RR target, fixed-% risk", () => {
     const close = 50_000;
     const atr = 1_000;
     const equity = 10_000;
+    const dist = STOP_MULT * atr;
     const p = planEntry("long", close, atr, equity);
 
-    expect(p.entryPrice).toBeCloseTo(close * (1 + SLIP), 8); // 50025
-    expect(p.stopDistance).toBeCloseTo(2.5 * atr, 8); // 2500
-    expect(p.stopPrice).toBeCloseTo(p.entryPrice - 2500, 8);
-    expect(p.targetPrice).toBeCloseTo(p.entryPrice + 3 * 2500, 8);
-    expect(p.qty).toBeCloseTo((equity * 0.015) / 2500, 12); // 0.06
+    expect(p.entryPrice).toBeCloseTo(close * (1 + SLIP), 8);
+    expect(p.stopDistance).toBeCloseTo(dist, 8);
+    expect(p.stopPrice).toBeCloseTo(p.entryPrice - dist, 8);
+    expect(p.targetPrice).toBeCloseTo(p.entryPrice + RR * dist, 8);
+    expect(p.qty).toBeCloseTo((equity * RISK) / dist, 12);
     expect(p.entryFee).toBeCloseTo(p.qty * p.entryPrice * FEE, 8);
-    // risk if stopped (ignoring fees/slippage-on-exit) = 1.5% of equity
-    expect(p.qty * p.stopDistance).toBeCloseTo(equity * 0.015, 8);
+    // The invariant that matters: risk if stopped is a fixed % of equity,
+    // whatever the stop multiple happens to be.
+    expect(p.qty * p.stopDistance).toBeCloseTo(equity * RISK, 8);
   });
 
   it("short: entry slips DOWN, stop above, target below", () => {
+    const dist = STOP_MULT * 1_000;
     const p = planEntry("short", 50_000, 1_000, 10_000);
     expect(p.entryPrice).toBeCloseTo(50_000 * (1 - SLIP), 8);
     expect(p.stopPrice).toBeGreaterThan(p.entryPrice);
     expect(p.targetPrice).toBeLessThan(p.entryPrice);
-    expect(p.targetPrice).toBeCloseTo(p.entryPrice - 3 * 2500, 8);
+    expect(p.targetPrice).toBeCloseTo(p.entryPrice - RR * dist, 8);
+  });
+
+  it("a wider stop takes a smaller position, keeping dollar risk constant", () => {
+    // v1.2.0 widened the stop; this is why that does not increase risk.
+    const tight = planEntry("long", 50_000, 1_000, 10_000, {
+      ...DEFAULT_FILL_PARAMS, stopAtrMult: 2.5,
+    });
+    const wide = planEntry("long", 50_000, 1_000, 10_000, {
+      ...DEFAULT_FILL_PARAMS, stopAtrMult: 3.5,
+    });
+    expect(wide.qty).toBeLessThan(tight.qty);
+    expect(wide.qty * wide.stopDistance).toBeCloseTo(tight.qty * tight.stopDistance, 8);
+    // and the smaller position ties up less of the shared account
+    expect(wide.entryPrice * wide.qty).toBeLessThan(tight.entryPrice * tight.qty);
   });
 });
 
@@ -186,6 +214,61 @@ describe("decideEntry — strategy gates", () => {
     const d = decideEntry({ ...base, ema200: null }, false, false, null);
     expect(d.enter).toBeNull();
     expect(d.reason).toContain("warming up");
+  });
+});
+
+describe("venue direction limits", () => {
+  const bullLong = {
+    close: 102, prevClose: 99, ema21: 100, prevEma21: 100,
+    ema50: 100, ema200: 90, rsi14: 60, atr14: 2,
+  };
+  const bearShort = {
+    close: 98, prevClose: 101, ema21: 100, prevEma21: 100,
+    ema50: 90, ema200: 100, rsi14: 40, atr14: 2,
+  };
+  const longOnly = { allowLong: true, allowShort: false };
+  const both = { allowLong: true, allowShort: true };
+
+  it("takes the short when the venue allows both directions", () => {
+    expect(decideEntry(bearShort, false, false, null, both).enter).toBe("short");
+  });
+
+  it("refuses the same short on a long-only venue and says why", () => {
+    const d = decideEntry(bearShort, false, false, null, longOnly);
+    expect(d.enter).toBeNull();
+    expect(d.reason).toContain("long-only");
+    expect(d.gates.venueBlocked).toBe(true);
+    expect(d.gates.allowedSide).toBeNull();
+    // The regime itself is still reported honestly.
+    expect(d.gates.regime).toBe("bear");
+  });
+
+  it("leaves longs untouched on a long-only venue", () => {
+    const d = decideEntry(bullLong, false, false, null, longOnly);
+    expect(d.enter).toBe("long");
+    expect(d.gates.venueBlocked).toBe(false);
+    expect(d.gates.allowedSide).toBe("long");
+  });
+
+  it("defaults to allowing both directions when no limits are passed", () => {
+    expect(decideEntry(bearShort, false, false, null).enter).toBe("short");
+  });
+
+  it("never reports 'shorts only' on a venue that never shorts", () => {
+    // No crossover, bear regime, long-only venue: the regime is real but the
+    // conclusion normally drawn from it ("shorts only") is not.
+    const quiet = { ...bearShort, close: 95, prevClose: 94 }; // below EMA21 both bars
+    const d = decideEntry(quiet, false, false, null, longOnly);
+    expect(d.enter).toBeNull();
+    expect(d.gates.venueBlocked).toBe(true);
+    expect(d.reason).not.toContain("shorts only");
+    expect(d.reason).toContain("stands aside");
+  });
+
+  it("still reports 'shorts only' when the venue does short", () => {
+    const quiet = { ...bearShort, close: 95, prevClose: 94 };
+    const d = decideEntry(quiet, false, false, null, both);
+    expect(d.reason).toContain("shorts only");
   });
 });
 

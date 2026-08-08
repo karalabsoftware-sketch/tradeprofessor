@@ -353,7 +353,20 @@ export interface EntryGates {
   rsiOk: boolean;
   flat: boolean;
   notHalted: boolean;
+  /**
+   * The regime points in a direction this venue does not trade — US equities
+   * are long-only, so a bear regime simply means "stand aside".
+   */
+  venueBlocked: boolean;
 }
+
+/** Direction limits imposed by the venue, on top of the regime filter. */
+export interface DirectionLimits {
+  allowLong: boolean;
+  allowShort: boolean;
+}
+
+const BOTH_DIRECTIONS: DirectionLimits = { allowLong: true, allowShort: true };
 
 /**
  * Pure entry decision — exported for tests. Returns the reason AND a
@@ -364,16 +377,42 @@ export function decideEntry(
   ind: IndicatorSnapshot,
   hasOpenPosition: boolean,
   halted: boolean,
-  haltReason: string | null
+  haltReason: string | null,
+  limits: DirectionLimits = BOTH_DIRECTIONS
 ): { enter: Side | null; reason: string; gates: EntryGates } {
   const core = decideEntryCore(ind, hasOpenPosition, halted, haltReason);
-  return { ...core, gates: computeGates(ind, hasOpenPosition, halted) };
+  const gates = computeGates(ind, hasOpenPosition, halted, limits);
+
+  // The venue can veto a decision the market rules would have taken.
+  if (core.enter === "long" && !limits.allowLong) {
+    return { enter: null, reason: "long entries are disabled for this venue", gates };
+  }
+  if (core.enter === "short" && !limits.allowShort) {
+    return {
+      enter: null,
+      reason: "valid short setup, but this venue is long-only (equities drift upward; shorting single names fights that)",
+      gates,
+    };
+  }
+
+  // Even without a signal, do not report "shorts only" on a venue that never
+  // shorts — the regime is real but the conclusion drawn from it is not.
+  if (core.enter === null && gates.venueBlocked && gates.regime !== null) {
+    const wanted = gates.regime === "bear" ? "short" : "long";
+    return {
+      enter: null,
+      reason: `regime is ${gates.regime} (EMA50 ${gates.regime === "bull" ? ">" : "<"} EMA200), which would mean ${wanted}s — this venue does not take them, so it stands aside`,
+      gates,
+    };
+  }
+  return { ...core, gates };
 }
 
 function computeGates(
   ind: IndicatorSnapshot,
   hasOpenPosition: boolean,
-  halted: boolean
+  halted: boolean,
+  limits: DirectionLimits
 ): EntryGates {
   const warmedUp =
     ind.ema21 !== null &&
@@ -384,7 +423,10 @@ function computeGates(
     ind.atr14 !== null;
 
   const regime = warmedUp ? (ind.ema50! > ind.ema200! ? "bull" : "bear") : null;
-  const allowedSide: Side | null = regime === null ? null : regime === "bull" ? "long" : "short";
+  const regimeSide: Side | null = regime === null ? null : regime === "bull" ? "long" : "short";
+  const venueBlocked =
+    (regimeSide === "long" && !limits.allowLong) || (regimeSide === "short" && !limits.allowShort);
+  const allowedSide: Side | null = venueBlocked ? null : regimeSide;
   const up = crossedAbove(ind.prevClose, ind.prevEma21, ind.close, ind.ema21);
   const down = crossedBelow(ind.prevClose, ind.prevEma21, ind.close, ind.ema21);
   const r = ind.rsi14;
@@ -393,6 +435,7 @@ function computeGates(
     warmedUp,
     regime,
     allowedSide,
+    venueBlocked,
     crossedAbove: up,
     crossedBelow: down,
     crossoverOk: allowedSide === "long" ? up : allowedSide === "short" ? down : false,

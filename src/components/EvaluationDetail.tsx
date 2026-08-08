@@ -22,6 +22,7 @@ export interface EvalGates {
   rsiOk: boolean;
   flat: boolean;
   notHalted: boolean;
+  venueBlocked?: boolean;
 }
 
 export interface EvalDetails {
@@ -130,7 +131,9 @@ export default function EvaluationDetail({
               detail={
                 g.regime === null
                   ? "unknown"
-                  : `${g.regime.toUpperCase()} (EMA50 ${g.regime === "bull" ? ">" : "<"} EMA200) → only ${g.allowedSide?.toUpperCase()} entries allowed`
+                  : g.venueBlocked
+                    ? `${g.regime.toUpperCase()} (EMA50 ${g.regime === "bull" ? ">" : "<"} EMA200) → this venue does not trade that direction, so the bot stands aside`
+                    : `${g.regime.toUpperCase()} (EMA50 ${g.regime === "bull" ? ">" : "<"} EMA200) → only ${g.allowedSide?.toUpperCase()} entries allowed`
               }
             />
             <Gate
@@ -176,7 +179,11 @@ function MissingConditions({
 
   const items: string[] = [];
 
-  if (!g.flat) {
+  if (g.venueBlocked) {
+    items.push(
+      `The trend points ${g.regime === "bear" ? "down" : "up"}, but this venue only trades the other side. Nothing will be opened until the regime turns.`
+    );
+  } else if (!g.flat) {
     items.push("The bot holds one position at a time — nothing new opens until the current one closes at its stop or target.");
   } else if (!g.notHalted) {
     items.push("The risk engine has halted new entries. It needs a manual reset before the bot can trade again.");
@@ -220,7 +227,7 @@ function MissingConditions({
   return (
     <>
       <h3 className="gate-title">What would have to change</h3>
-      {g.flat && g.notHalted && g.allowedSide && (
+      {g.flat && g.notHalted && g.allowedSide && !g.venueBlocked && (
         <p className="eval-reason" style={{ marginTop: 0, marginBottom: 6 }}>
           In the current {g.regime} regime the bot can only open a{" "}
           <strong>{g.allowedSide.toUpperCase()}</strong>. For that, on some future {intervalLabel} close:

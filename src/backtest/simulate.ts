@@ -89,8 +89,9 @@ export function entrySignal(ctx: MarketContext, v: Variant, i: number): Side | n
 
   const regime = regimeAt(ctx, v, i);
   if (v.regime !== "none" && regime === null) return null;
-  const allowLong = v.regime === "none" || regime === "bull";
-  const allowShort = v.regime === "none" || regime === "bear";
+  // Regime decides direction; the variant's own flags can narrow it further.
+  const allowLong = (v.regime === "none" || regime === "bull") && v.allowLong;
+  const allowShort = (v.regime === "none" || regime === "bear") && v.allowShort;
 
   // Direction proposed by the entry trigger
   let side: Side | null = null;

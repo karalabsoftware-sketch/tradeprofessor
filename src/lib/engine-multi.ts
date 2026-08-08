@@ -24,8 +24,9 @@
  * PAPER TRADING ONLY. No order-placement path exists.
  */
 
-import { CONFIG, STRATEGY_VERSION } from "@/config/strategy";
+import { CONFIG, STRATEGY_VERSION, VENUE_RULES } from "@/config/strategy";
 import { enabledInstruments, Instrument } from "@/config/instruments";
+import { DEFAULT_FILL_PARAMS, FillParams } from "./fills";
 import { Candle, closedOnly, fetchCandles } from "./marketdata";
 import { db } from "./db";
 import { atr, ema, rsi } from "./indicators";
@@ -219,6 +220,12 @@ export async function runEvaluation(): Promise<EvaluationResult> {
     const inst = data.inst;
     const i = data.lastIdx;
     const held = positions.some((p) => p.instrument_id === inst.id);
+    const rules = VENUE_RULES[inst.venue];
+    const fillParams: FillParams = {
+      ...DEFAULT_FILL_PARAMS,
+      stopAtrMult: rules.stopAtrMult,
+      rrMultiple: rules.rrMultiple,
+    };
 
     const decision = decideEntry(
       {
@@ -233,7 +240,8 @@ export async function runEvaluation(): Promise<EvaluationResult> {
       },
       held,
       account.halted,
-      account.halt_reason
+      account.halt_reason,
+      { allowLong: rules.allowLong, allowShort: rules.allowShort }
     );
 
     let action = decision.enter ? `entry_${decision.enter}` : "none";
@@ -243,7 +251,13 @@ export async function runEvaluation(): Promise<EvaluationResult> {
     if (decision.enter) {
       const deployed = sumNotional(positions);
       const available = account.realized_equity - deployed;
-      const plan = planEntry(decision.enter, data.candles[i].close, data.atr14[i] as number, account.realized_equity);
+      const plan = planEntry(
+        decision.enter,
+        data.candles[i].close,
+        data.atr14[i] as number,
+        account.realized_equity,
+        fillParams
+      );
       const notional = plan.entryPrice * plan.qty;
 
       if (notional > available) {

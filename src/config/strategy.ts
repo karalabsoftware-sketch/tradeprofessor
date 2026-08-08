@@ -17,8 +17,67 @@
  *         deployed — those refusals are recorded in `missed_opportunities`.
  *         Stop fills became gap-aware, which matters for equities that gap
  *         overnight and can only ever make results more conservative.
+ * v1.2.0  Stop widens to 3.5xATR and the target to 1:4, everywhere. Found by
+ *         two independent procedures: a per-instrument grid picked a wider
+ *         stop on 6 of 11 instruments, and testing it as a single SHARED
+ *         change improved the holdout total from -$3,980 to +$653, improving
+ *         in both halves for BTC, ETH, SOL and HBAR. Mechanism: a 2.5xATR
+ *         stop sits inside normal noise and is taken out before the move
+ *         develops. Also introduces VENUE_RULES — see below.
  */
-export const STRATEGY_VERSION = "multi-trend-v1.1.0";
+export const STRATEGY_VERSION = "multi-trend-v1.2.0";
+
+export type VenueKey = "crypto" | "us-equity";
+
+export interface VenueRules {
+  interval: string;
+  intervalMs: number;
+  /** Direction limits applied on top of the regime filter. */
+  allowLong: boolean;
+  allowShort: boolean;
+  stopAtrMult: number;
+  /** Target distance as a multiple of the stop distance. */
+  rrMultiple: number;
+}
+
+/**
+ * Venue-level rules. NOT per-instrument tuning — every instrument inside a
+ * venue is treated identically, and the two venues differ only where market
+ * structure forces it:
+ *
+ *  - **Bar length.** Crypto trades 24/7 so 4h bars line up with the clock.
+ *    US equities trade 6.5h a day, which no 4h grid divides; measured across
+ *    the five stocks, daily bars beat hourly in every configuration tested
+ *    (e.g. long-only 3.5x/1:4: holdout PF 0.64 on 1h vs 1.51 on 1d).
+ *
+ *  - **Direction.** Equity prices drift upward over time, so shorting an
+ *    individual stock fights that drift. Skipping shorts improved the holdout
+ *    in all four paired comparisons (1d 2.5x/1:3: 0.79 -> 1.06; 1d 3.5x/1:4:
+ *    0.99 -> 1.51). Crypto has no comparable drift and keeps both directions.
+ *
+ * The entry rule, indicators, sizing and risk engine are identical everywhere.
+ * A Donchian breakout scored the same on equities (holdout 1.49 vs 1.51) and
+ * was rejected — a second entry rule is more surface to overfit for no
+ * measurable gain.
+ */
+export const VENUE_RULES: Record<VenueKey, VenueRules> = {
+  crypto: {
+    interval: "4h",
+    intervalMs: 4 * 60 * 60 * 1000,
+    allowLong: true,
+    allowShort: true,
+    stopAtrMult: 3.5,
+    rrMultiple: 4,
+  },
+  "us-equity": {
+    interval: "1d",
+    intervalMs: 24 * 60 * 60 * 1000,
+    allowLong: true,
+    allowShort: false,
+    stopAtrMult: 3.5,
+    rrMultiple: 4,
+  },
+};
 
 export interface SymbolConfig {
   symbol: string;
@@ -73,10 +132,14 @@ export const CONFIG = {
   },
 
   exits: {
-    /** Stop = entry -/+ stopAtrMult * ATR14. */
-    stopAtrMult: 2.5,
-    /** Target distance = rrMultiple * stop distance (1:3 RR). */
-    rrMultiple: 3,
+    /**
+     * Stop = entry -/+ stopAtrMult * ATR14. Widened from 2.5 to 3.5 in
+     * v1.2.0; see VENUE_RULES for the evidence. Venue rules override these,
+     * but both venues currently use the same numbers.
+     */
+    stopAtrMult: 3.5,
+    /** Target distance = rrMultiple * stop distance (1:4 RR). */
+    rrMultiple: 4,
   },
 
   sizing: {

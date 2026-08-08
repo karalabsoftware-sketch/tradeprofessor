@@ -8,7 +8,7 @@
  */
 
 import { Candle, fetchKlines } from "./binance";
-import { Instrument } from "@/config/instruments";
+import { Instrument, intervalOf } from "@/config/instruments";
 
 export type { Candle };
 
@@ -102,11 +102,16 @@ export function intervalToMs(interval: string): number {
 }
 
 /** Fetch the most recent `limit` bars for an instrument, oldest first. */
-export async function fetchCandles(inst: Instrument, limit: number): Promise<Candle[]> {
+export async function fetchCandles(
+  inst: Instrument,
+  limit: number,
+  intervalOverride?: string
+): Promise<Candle[]> {
+  const interval = intervalOverride ?? intervalOf(inst);
   const raw =
     inst.provider === "binance"
-      ? await fetchKlines(inst.providerSymbol, inst.interval, limit)
-      : await fetchYahoo(inst.providerSymbol, inst.interval, limit);
+      ? await fetchKlines(inst.providerSymbol, interval, limit)
+      : await fetchYahoo(inst.providerSymbol, interval, limit);
 
   // Providers occasionally repeat a bar across paged/cached responses.
   const seen = new Set<number>();
