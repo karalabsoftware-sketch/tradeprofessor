@@ -42,6 +42,8 @@ export interface PositionLike {
 }
 
 export interface CandleLike {
+  /** Needed for gap handling — a bar can open beyond the stop. */
+  open: number;
   high: number;
   low: number;
   close: number;
@@ -86,8 +88,15 @@ export interface ExitFill {
 }
 
 /**
- * Check one candle's high/low against the position's stop/target.
+ * Check one candle's range against the position's stop/target.
+ *
  * Stop is checked FIRST — worst case when both are touched in the same candle.
+ *
+ * Gaps are handled honestly: if the bar OPENS beyond the stop, the fill is the
+ * open, not the stop price, because there was never a chance to trade at the
+ * stop. This matters for US equities, which gap overnight and over weekends;
+ * for 24/7 crypto it almost never triggers. Targets always fill at the target
+ * price even on a favourable gap, so the asymmetry stays conservative.
  */
 export function checkPriceExit(
   pos: PositionLike,
@@ -95,6 +104,9 @@ export function checkPriceExit(
   p: FillParams = DEFAULT_FILL_PARAMS
 ): ExitFill | null {
   if (pos.side === "long") {
+    if (candle.open <= pos.stopPrice) {
+      return { price: candle.open * (1 - p.slippagePct), reason: "stop" };
+    }
     if (candle.low <= pos.stopPrice) {
       return { price: pos.stopPrice * (1 - p.slippagePct), reason: "stop" };
     }
@@ -102,6 +114,9 @@ export function checkPriceExit(
       return { price: pos.targetPrice, reason: "target" };
     }
   } else {
+    if (candle.open >= pos.stopPrice) {
+      return { price: candle.open * (1 + p.slippagePct), reason: "stop" };
+    }
     if (candle.high >= pos.stopPrice) {
       return { price: pos.stopPrice * (1 + p.slippagePct), reason: "stop" };
     }

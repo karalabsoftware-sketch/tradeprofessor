@@ -1,4 +1,27 @@
-# PaperTrade BTC
+# PaperTrade
+
+**Twelve instruments, two venues, one shared $10,000 account.** The same trend
+rules run on crypto (Binance, 4h bars) and US stocks (Yahoo Finance, 1h bars).
+Capital is finite and shared: when it is fully deployed, a valid signal is
+recorded as a **missed opportunity** rather than taken — measuring what a fixed
+budget costs is one of the goals, not a side effect.
+
+| Venue | Instruments |
+|---|---|
+| Crypto (4h) | BTC, ETH, SOL, XRP, SUI, HBAR |
+| US stocks (1h) | AAPL, AMZN, INTC, META, NVDA, SPCX |
+
+US equities use 1h bars because a 6.5-hour session does not divide into 4h;
+that is a venue constraint, not a tuning choice. Stop fills are gap-aware —
+a bar that opens past the stop fills at the open, which matters for equities
+that gap overnight.
+
+> **No per-instrument tuning.** The same rules run everywhere. We measured the
+> baseline across ten crypto symbols and per-symbol results were uncorrelated
+> between the training and holdout halves (ADA 0.75 → 1.45, DOT 1.26 → 0.43),
+> so fitting parameters per instrument would be fitting noise.
+
+
 
 A **paper-trading** bot for a 4h BTCUSDT trend strategy, with a public read-only
 dashboard. Runs entirely on free tiers: Vercel Hobby + Neon/Supabase Postgres +

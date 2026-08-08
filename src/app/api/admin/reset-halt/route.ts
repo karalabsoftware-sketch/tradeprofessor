@@ -19,24 +19,24 @@ export async function POST(req: Request) {
 
   const sql = db();
   const rows = await sql`
-    UPDATE bot_state SET
+    UPDATE account_state SET
       halted = false,
       halt_reason = NULL,
       consecutive_losses = 0,
-      day_start_equity = equity,
+      day_start_equity = realized_equity,
       day_start_date = ${new Date().toISOString().slice(0, 10)},
-      peak_equity = equity,
+      peak_equity = realized_equity,
       updated_at = now()
     WHERE id = 1
-    RETURNING equity, halted
+    RETURNING realized_equity, halted
   `;
   if (rows.length === 0) {
-    return NextResponse.json({ error: "bot_state not initialized" }, { status: 409 });
+    return NextResponse.json({ error: "account_state not initialized" }, { status: 409 });
   }
 
   await sql`
-    INSERT INTO signals (symbol, candle_time, action, reason, strategy_version)
-    VALUES ('*', NULL, 'halt', 'halt manually reset via admin route', ${STRATEGY_VERSION})
+    INSERT INTO signals (symbol, instrument_id, candle_time, action, reason, strategy_version)
+    VALUES ('*', '*', NULL, 'halt', 'halt manually reset via admin route', ${STRATEGY_VERSION})
   `;
-  return NextResponse.json({ ok: true, equity: Number(rows[0].equity), halted: false });
+  return NextResponse.json({ ok: true, equity: Number(rows[0].realized_equity), halted: false });
 }

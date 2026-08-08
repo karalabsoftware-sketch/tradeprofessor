@@ -1,61 +1,86 @@
+import Link from "next/link";
 import { CONFIG, STRATEGY_VERSION } from "@/config/strategy";
-import { db } from "@/lib/db";
 import {
-  computeMetrics,
-  formatAge,
-  nextCandleClose,
-  nextPoll,
-  schedulerHealth,
-} from "@/lib/metrics";
+  instrumentById,
+  instrumentsByVenue,
+  enabledInstruments,
+  Venue,
+  VENUE_LABELS,
+} from "@/config/instruments";
+import { db } from "@/lib/db";
+import { computeMetrics, formatAge, nextPoll, schedulerHealth } from "@/lib/metrics";
+import { fmtDateTime, tzLabel } from "@/lib/format";
+import { ema, rsi } from "@/lib/indicators";
 import EquityChart from "@/components/EquityChart";
 import EvaluationDetail, { EvalDetails } from "@/components/EvaluationDetail";
 import PriceChart, { PricePoint, TradeMarker } from "@/components/PriceChart";
-import { fmtDateTime, tzLabel } from "@/lib/format";
-import { ema, rsi } from "@/lib/indicators";
 
 export const dynamic = "force-dynamic";
 export const revalidate = 0;
 
-/** Candles drawn on the price chart (~20 days at 4h). */
 const CHART_CANDLES = 120;
+const VENUES: Venue[] = ["crypto", "us-equity"];
 
-export default async function Dashboard() {
-  let data: Awaited<ReturnType<typeof loadDashboard>>;
+export default async function Dashboard({
+  searchParams,
+}: {
+  searchParams: { i?: string };
+}) {
+  const selected = (searchParams.i && instrumentById(searchParams.i)?.enabled ? searchParams.i : "BTCUSDT") as string;
+  const inst = instrumentById(selected);
+
+  let data: Awaited<ReturnType<typeof load>>;
   try {
-    data = await loadDashboard();
+    data = await load(selected);
   } catch (err) {
     return (
       <main className="wrap">
         <Header />
         <div className="error-banner">
-          Dashboard is not ready yet: {err instanceof Error ? err.message : String(err)}. Run the
-          seed script and check DATABASE_URL.
+          Dashboard is not ready yet: {err instanceof Error ? err.message : String(err)}. Run{" "}
+          <code>npm run seed</code> and check DATABASE_URL.
         </div>
       </main>
     );
   }
 
-  const { state, openTrade, trades, snapshots, signals, lastPrice, priceSeries, markers } = data;
+  const { account, states, openPositions, trades, snapshots, signals, priceSeries, missed } = data;
 
-  if (!state) {
+  if (!account || !inst) {
     return (
       <main className="wrap">
         <Header />
-        <div className="error-banner">Bot not initialized — run <code>npm run seed</code> to backfill candles and create the initial state.</div>
+        <div className="error-banner">
+          Bot not initialized — run <code>npm run seed</code>.
+        </div>
       </main>
     );
   }
 
-  const equitySeries = snapshots.map((s) => s.equity);
-  const metrics = computeMetrics(trades, equitySeries);
-  const markEquity = snapshots.length > 0 ? snapshots[snapshots.length - 1].equity : state.equity;
-  const totalReturn = ((markEquity - CONFIG.account.startingEquity) / CONFIG.account.startingEquity) * 100;
-
   const now = Date.now();
-  const health = schedulerHealth(state.last_eval_at, now, CONFIG.schedule.stalenessMs);
+  const health = schedulerHealth(account.last_eval_at, now, CONFIG.schedule.stalenessMs);
   const nextCheck = nextPoll(now, CONFIG.schedule.pollMinute);
-  const nextDecision = nextCandleClose(now, CONFIG.intervalMs);
+
+  const deployed = openPositions.reduce((s, p) => s + p.notional, 0);
+  const unrealized = openPositions.reduce((s, p) => s + p.unrealized, 0);
+  const equity = account.realized_equity + unrealized;
+  const available = account.realized_equity - deployed;
+  const totalReturn = ((equity - CONFIG.account.startingEquity) / CONFIG.account.startingEquity) * 100;
+
+  const metrics = computeMetrics(trades, snapshots.map((s) => s.equity));
+  const state = states.get(selected);
+  const instTrades = trades.filter((t) => t.instrument_id === selected);
+  const instOpen = openPositions.filter((p) => p.instrument_id === selected);
   const latest = signals.find((s) => s.action !== "skip") ?? null;
+
+  const markers: TradeMarker[] = [];
+  for (const t of instTrades) {
+    markers.push({ t: t.entry_candle, kind: "entry", side: t.side, price: t.entry_price });
+    if (t.exit_candle !== null) markers.push({ t: t.exit_candle, kind: "exit", side: t.side, price: t.exit_price });
+  }
+  for (const p of instOpen) {
+    markers.push({ t: p.entry_candle, kind: "entry", side: p.side, price: p.entry_price });
+  }
 
   return (
     <main className="wrap">
@@ -67,176 +92,202 @@ export default async function Dashboard() {
           {health.ageMs === null
             ? "The bot has never completed an evaluation."
             : `No successful run for ${formatAge(health.ageMs)} (expected roughly hourly).`}{" "}
-          Stops and targets are still replayed across every missed candle, but an
-          entry signal on a candle that was skipped over is not backfilled — check
-          the scheduler&apos;s execution history.
+          Check the scheduler&apos;s execution history.
         </div>
       )}
-      {state.halted && (
+      {account.halted && (
         <div className="halt-banner">
-          ⛔ <strong>Risk engine halt:</strong> new entries are blocked — {state.halt_reason}. Open
-          positions still get managed. Reset requires the admin secret.
+          ⛔ <strong>Risk engine halt:</strong> new entries are blocked across every instrument —{" "}
+          {account.halt_reason}. Open positions are still managed.
         </div>
       )}
-      {state.last_error && (
-        <div className="error-banner">
-          ⚠ Last evaluation problem: {state.last_error} (cycle skipped — no fills were fabricated)
-        </div>
-      )}
+
+      {/* ---------- shared account ---------- */}
+      <section className="account-bar">
+        <AccountStat label="Equity" value={usd(equity)} sub={`started ${usd(CONFIG.account.startingEquity)}`} />
+        <AccountStat
+          label="Total return"
+          value={signPct(totalReturn)}
+          tone={totalReturn >= 0 ? "pos" : "neg"}
+          sub="fees included"
+        />
+        <AccountStat
+          label="Deployed"
+          value={usd(deployed)}
+          sub={`${openPositions.length} open position${openPositions.length === 1 ? "" : "s"}`}
+        />
+        <AccountStat
+          label="Available"
+          value={usd(available)}
+          tone={available <= 0 ? "neg" : undefined}
+          sub={available <= 0 ? "fully invested — new signals will be missed" : "free to deploy"}
+        />
+      </section>
+      <div className="capital-bar" title={`${((deployed / Math.max(equity, 1)) * 100).toFixed(0)}% deployed`}>
+        <div
+          className="capital-bar-fill"
+          style={{ width: `${Math.min(100, (deployed / Math.max(equity, 1)) * 100)}%` }}
+        />
+      </div>
+      <p className="capital-note">
+        One shared account of {usd(CONFIG.account.startingEquity)} across all {enabledInstruments().length}{" "}
+        instruments — exactly as it would be in real life. When it is fully deployed, a valid signal is
+        recorded as a missed opportunity instead of being taken.
+      </p>
+
+      {/* ---------- instrument navigation ---------- */}
+      <nav className="venue-nav">
+        {VENUES.map((venue) => (
+          <div key={venue} className="venue-group">
+            <div className="venue-title">{VENUE_LABELS[venue]}</div>
+            <div className="chip-row">
+              {instrumentsByVenue(venue).map((it) => {
+                const st = states.get(it.id);
+                const hasPos = openPositions.some((p) => p.instrument_id === it.id);
+                return (
+                  <Link
+                    key={it.id}
+                    href={`/?i=${it.id}`}
+                    className={`chip ${it.id === selected ? "chip-active" : ""} ${st?.warming_up ? "chip-warming" : ""}`}
+                    scroll={false}
+                  >
+                    <span className="chip-id">{it.id.replace("USDT", "")}</span>
+                    <span className="chip-label">{it.label}</span>
+                    {hasPos && <span className="chip-dot" title="open position" />}
+                    {st?.warming_up && <span className="chip-warm">warming up</span>}
+                  </Link>
+                );
+              })}
+            </div>
+          </div>
+        ))}
+      </nav>
 
       <div className="grid">
-        {/* ---- Header stats ---- */}
-        <section className="card span-4">
-          <h2>Equity (mark-to-market)</h2>
-          <div className="hero-number">{usd(markEquity)}</div>
-          <div className="hero-sub">
-            realized {usd(state.equity)} · started {usd(CONFIG.account.startingEquity)}
+        {/* ---------- selected instrument ---------- */}
+        <section className="card span-12">
+          <div className="inst-head">
+            <div>
+              <h2 style={{ marginBottom: 2 }}>{VENUE_LABELS[inst.venue]}</h2>
+              <div className="inst-title">
+                {inst.label} <span className="muted">· {inst.id} · {inst.interval}</span>
+              </div>
+            </div>
+            <div className="inst-pos">
+              {instOpen.length > 0 ? (
+                instOpen.map((p) => (
+                  <div key={p.id}>
+                    <SideBadge side={p.side} /> @ {px(p.entry_price, inst.id)}{" "}
+                    <span className={p.unrealized >= 0 ? "pos" : "neg"}>{signUsd(p.unrealized)}</span>
+                    <div className="muted" style={{ fontSize: 12 }}>
+                      {usd(p.notional)} deployed · stop {px(p.stop_price, inst.id)} · target {px(p.target_price, inst.id)}
+                    </div>
+                  </div>
+                ))
+              ) : (
+                <span className="muted">Flat</span>
+              )}
+            </div>
           </div>
-        </section>
-
-        <section className="card span-4">
-          <h2>Total return</h2>
-          <div className={`hero-number ${totalReturn >= 0 ? "pos" : "neg"}`}>{signPct(totalReturn)}</div>
-          <div className="hero-sub">since inception · fees included</div>
-        </section>
-
-        <section className="card span-4">
-          <h2>Open position</h2>
-          {openTrade ? (
-            <OpenPositionCard trade={openTrade} lastPrice={lastPrice} />
-          ) : (
-            <>
-              <div className="hero-number muted">Flat</div>
-              <div className="hero-sub">no open position</div>
-            </>
+          {inst.note && state?.warming_up && (
+            <div className="warm-note">
+              ⏳ {inst.note} — {state.candles_seen}/{CONFIG.minCandles} bars collected. The engine will not
+              trade it until EMA200 is trustworthy.
+            </div>
           )}
         </section>
 
-        {/* ---- Why the last evaluation did (or didn't) trade ---- */}
-        <section className="card span-12">
-          <h2>Latest decision — why the bot did or didn&apos;t trade</h2>
-          {latest ? (
-            <EvaluationDetail
-              candleTime={latest.candle_time}
-              action={latest.action}
-              reason={latest.reason}
-              details={latest.details}
-              evaluatedAt={latest.created_at}
-              stale={health.stale}
-            />
-          ) : (
-            <p className="muted" style={{ fontSize: 13 }}>
-              No evaluation recorded yet.
-            </p>
-          )}
-        </section>
+        {!state?.warming_up && (
+          <>
+            <section className="card span-12">
+              <h2>Latest decision — why the bot did or didn&apos;t trade</h2>
+              {latest ? (
+                <EvaluationDetail
+                  candleTime={latest.candle_time}
+                  action={latest.action}
+                  reason={latest.reason}
+                  details={latest.details}
+                  evaluatedAt={latest.created_at}
+                  stale={health.stale}
+                  intervalMs={inst.intervalMs}
+                  intervalLabel={inst.interval}
+                />
+              ) : (
+                <p className="muted" style={{ fontSize: 13 }}>No evaluation recorded yet for {inst.id}.</p>
+              )}
+            </section>
 
-        {/* ---- Price chart with the strategy's own indicators ---- */}
-        <section className="card span-12">
-          <h2>BTCUSDT 4h — the same indicators the bot decides on</h2>
-          <PriceChart
-            points={priceSeries.slice(-CHART_CANDLES)}
-            markers={markers}
-            latestDecisionT={latest?.candle_time ?? null}
-          />
-          <p className="muted" style={{ fontSize: 12, marginTop: 8 }}>
-            Last {Math.min(CHART_CANDLES, priceSeries.length)} closed 4h candles. The highlighted
-            column is the candle of the latest decision. A long needs the close to cross{" "}
-            <em>above</em> EMA21 while RSI is outside the shaded dead band and EMA50 is above
-            EMA200.
-          </p>
-        </section>
+            <section className="card span-12">
+              <h2>{inst.label} {inst.interval} — the same indicators the bot decides on</h2>
+              <PriceChart
+                points={priceSeries.slice(-CHART_CANDLES)}
+                markers={markers}
+                latestDecisionT={latest?.candle_time ?? null}
+              />
+            </section>
+          </>
+        )}
 
-        {/* ---- Equity curve ---- */}
+        {/* ---------- account-wide ---------- */}
         <section className="card span-12">
-          <h2>Equity curve — one point per evaluation (USD)</h2>
+          <h2>Equity curve — shared account (USD)</h2>
           <EquityChart
             points={snapshots.map((s) => ({ t: s.candle_time, equity: s.equity }))}
             baseline={CONFIG.account.startingEquity}
           />
         </section>
 
-        {/* ---- Metrics ---- */}
         <section className="card span-6">
-          <h2>Performance metrics</h2>
-          <div className="stat-row"><span className="k">Closed trades</span><span className="num">{metrics.totalTrades}</span></div>
-          <div className="stat-row"><span className="k">Win rate</span><span className="num">{metrics.winRatePct === null ? "—" : `${metrics.winRatePct.toFixed(1)}% (${metrics.wins}W / ${metrics.losses}L)`}</span></div>
-          <div className="stat-row"><span className="k">Profit factor</span><span className="num">{metrics.profitFactor === null ? "—" : metrics.profitFactor === Infinity ? "∞ (no losses yet)" : metrics.profitFactor.toFixed(2)}</span></div>
-          <div className="stat-row"><span className="k">Max drawdown</span><span className="num">{metrics.maxDrawdownPct.toFixed(2)}%</span></div>
-          <div className="stat-row"><span className="k">Avg trade</span><span className={`num ${metrics.avgTrade >= 0 ? "pos" : "neg"}`}>{metrics.totalTrades ? signUsd(metrics.avgTrade) : "—"}</span></div>
-          <div className="stat-row"><span className="k">Total fees paid</span><span className="num">{usd(metrics.totalFees)}</span></div>
-          <div className="stat-row"><span className="k">Current streak</span><span className="num">{streakLabel(metrics.currentStreak)}</span></div>
+          <h2>Performance — all instruments</h2>
+          <Row k="Closed trades" v={String(metrics.totalTrades)} />
+          <Row k="Win rate" v={metrics.winRatePct === null ? "—" : `${metrics.winRatePct.toFixed(1)}% (${metrics.wins}W / ${metrics.losses}L)`} />
+          <Row k="Profit factor" v={metrics.profitFactor === null ? "—" : metrics.profitFactor === Infinity ? "∞" : metrics.profitFactor.toFixed(2)} />
+          <Row k="Max drawdown" v={`${metrics.maxDrawdownPct.toFixed(2)}%`} />
+          <Row k="Avg trade" v={metrics.totalTrades ? signUsd(metrics.avgTrade) : "—"} />
+          <Row k="Total fees" v={usd(metrics.totalFees)} />
+          <Row k="Current streak" v={streakLabel(metrics.currentStreak)} />
         </section>
 
-        {/* ---- Bot status ---- */}
         <section className="card span-6">
           <h2>Bot status</h2>
-          <div className="stat-row">
-            <span className="k">State</span>
-            <span>
-              <span
-                className="status-dot"
-                style={{
-                  background: state.halted ? "var(--bad)" : health.stale ? "var(--warn)" : "var(--good)",
-                }}
-              />
-              {state.halted ? `HALTED — ${state.halt_reason}` : health.stale ? "scheduler down" : "active"}
-            </span>
-          </div>
-          <div className="stat-row">
-            <span className="k">Last successful run</span>
-            <span className="num">
-              {state.last_eval_at ? `${ts(state.last_eval_at)} (${formatAge(health.ageMs ?? 0)} ago)` : "never"}
-            </span>
-          </div>
-          <div className="stat-row"><span className="k">Last candle evaluated</span><span className="num">{state.last_candle_time ? ts(new Date(state.last_candle_time)) : "—"}</span></div>
-          <div className="stat-row"><span className="k">Next check</span><span className="num">{ts(nextCheck)}</span></div>
-          <div className="stat-row"><span className="k">Next possible decision</span><span className="num">{ts(nextDecision)} (4h close)</span></div>
-          <div className="stat-row"><span className="k">Consecutive losses</span><span className="num">{state.consecutive_losses} / {CONFIG.risk.maxConsecutiveLosses}</span></div>
-          <div className="stat-row"><span className="k">Strategy version</span><span className="num">{STRATEGY_VERSION}</span></div>
-          <div className="stat-row"><span className="k">Symbols</span><span className="num">{CONFIG.symbols.map((s) => `${s.symbol}${s.enabled ? "" : " (off)"}`).join(" · ")}</span></div>
+          <Row
+            k="State"
+            v={account.halted ? `HALTED — ${account.halt_reason}` : health.stale ? "scheduler down" : "active"}
+            dot={account.halted ? "var(--bad)" : health.stale ? "var(--warn)" : "var(--good)"}
+          />
+          <Row k="Last run" v={account.last_eval_at ? `${fmtDateTime(account.last_eval_at)} (${formatAge(health.ageMs ?? 0)} ago)` : "never"} />
+          <Row k="Next check" v={fmtDateTime(nextCheck)} />
+          <Row k="Instruments" v={`${enabledInstruments().length} total · ${[...states.values()].filter((s) => s.warming_up).length} warming up`} />
+          <Row k="Consecutive losses" v={`${account.consecutive_losses} / ${CONFIG.risk.maxConsecutiveLosses}`} />
+          <Row k="Strategy version" v={STRATEGY_VERSION} />
         </section>
 
-        {/* ---- Trade log ---- */}
+        {/* ---------- missed opportunities ---------- */}
         <section className="card span-12">
-          <h2>Trade log — every trade, nothing hidden</h2>
-          {trades.length === 0 && !openTrade ? (
-            <p className="muted" style={{ fontSize: 13 }}>No trades yet. The bot only enters on an EMA21 crossover event that passes every filter.</p>
+          <h2>Missed opportunities — valid signals the budget could not fund</h2>
+          {missed.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13 }}>
+              None yet. Every valid signal so far has been affordable.
+            </p>
           ) : (
             <div className="table-scroll">
               <table>
                 <thead>
                   <tr>
-                    <th>Entry time</th><th>Side</th><th>Entry</th><th>Exit</th><th>Qty</th>
-                    <th>Fees</th><th>P/L $</th><th>P/L %</th><th>Exit reason</th><th>Version</th>
+                    <th>When</th><th>Instrument</th><th>Side</th><th>Entry</th>
+                    <th>Needed</th><th>Available</th><th>Shortfall</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {openTrade && (
-                    <tr>
-                      <td className="num">{ts(openTrade.entry_time)}</td>
-                      <td><SideBadge side={openTrade.side} /></td>
-                      <td className="num">{px(openTrade.entry_price)}</td>
-                      <td className="num muted">open</td>
-                      <td className="num">{openTrade.qty.toFixed(5)}</td>
-                      <td className="num">{usd(openTrade.entry_fee)}</td>
-                      <td className="num muted" colSpan={2}>unrealized {signUsd(openTradePnl(openTrade, lastPrice))}</td>
-                      <td className="muted">—</td>
-                      <td className="num muted">{openTrade.strategy_version}</td>
-                    </tr>
-                  )}
-                  {trades.map((t) => (
-                    <tr key={t.id}>
-                      <td className="num">{ts(t.entry_time)}</td>
-                      <td><SideBadge side={t.side} /></td>
-                      <td className="num">{px(t.entry_price)}</td>
-                      <td className="num">{px(t.exit_price)}</td>
-                      <td className="num">{t.qty.toFixed(5)}</td>
-                      <td className="num">{usd(t.entry_fee + t.exit_fee)}</td>
-                      <td className={`num ${t.pnl >= 0 ? "pos" : "neg"}`}>{signUsd(t.pnl)}</td>
-                      <td className={`num ${t.pnl >= 0 ? "pos" : "neg"}`}>{signPct(t.pnl_pct)}</td>
-                      <td>{t.exit_reason}</td>
-                      <td className="num muted">{t.strategy_version}</td>
+                  {missed.map((m) => (
+                    <tr key={m.id}>
+                      <td className="num">{fmtDateTime(m.created_at)}</td>
+                      <td>{m.instrument_id}</td>
+                      <td><SideBadge side={m.side} /></td>
+                      <td className="num">{px(m.entry_price, m.instrument_id)}</td>
+                      <td className="num">{usd(m.wanted_notional)}</td>
+                      <td className="num">{usd(m.available_capital)}</td>
+                      <td className="num neg">{usd(m.wanted_notional - m.available_capital)}</td>
                     </tr>
                   ))}
                 </tbody>
@@ -245,192 +296,192 @@ export default async function Dashboard() {
           )}
         </section>
 
-        {/* ---- Recent evaluations ---- */}
+        {/* ---------- trade log ---------- */}
         <section className="card span-12">
-          <h2>Recent evaluations — every decision logged, including why NOT to trade</h2>
-          <ul className="signal-list">
-            {signals.length === 0 && <li className="muted">No evaluations yet.</li>}
-            {signals.map((s) => (
-              <li key={s.id}>
-                <span className="signal-time">
-                  {s.candle_time ? `${ts(new Date(s.candle_time))} candle` : ts(s.created_at)}
-                </span>
-                <span className="signal-action" style={{ color: actionColor(s.action) }}>{s.action}</span>
-                <span className="muted">{s.reason}</span>
-              </li>
-            ))}
-          </ul>
+          <h2>Trade log — every trade, nothing hidden</h2>
+          {trades.length === 0 && openPositions.length === 0 ? (
+            <p className="muted" style={{ fontSize: 13 }}>No trades yet.</p>
+          ) : (
+            <div className="table-scroll">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Entry time</th><th>Instrument</th><th>Side</th><th>Entry</th><th>Exit</th>
+                    <th>Notional</th><th>Fees</th><th>P/L $</th><th>P/L %</th><th>Exit reason</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {openPositions.map((p) => (
+                    <tr key={`o${p.id}`}>
+                      <td className="num">{fmtDateTime(p.entry_time)}</td>
+                      <td>{p.instrument_id}</td>
+                      <td><SideBadge side={p.side} /></td>
+                      <td className="num">{px(p.entry_price, p.instrument_id)}</td>
+                      <td className="num muted">open</td>
+                      <td className="num">{usd(p.notional)}</td>
+                      <td className="num">{usd(p.entry_fee)}</td>
+                      <td className={`num ${p.unrealized >= 0 ? "pos" : "neg"}`} colSpan={2}>
+                        unrealized {signUsd(p.unrealized)}
+                      </td>
+                      <td className="muted">—</td>
+                    </tr>
+                  ))}
+                  {trades.map((t) => (
+                    <tr key={t.id}>
+                      <td className="num">{fmtDateTime(t.entry_time)}</td>
+                      <td>{t.instrument_id}</td>
+                      <td><SideBadge side={t.side} /></td>
+                      <td className="num">{px(t.entry_price, t.instrument_id)}</td>
+                      <td className="num">{px(t.exit_price, t.instrument_id)}</td>
+                      <td className="num">{usd(t.notional)}</td>
+                      <td className="num">{usd(t.entry_fee + t.exit_fee)}</td>
+                      <td className={`num ${t.pnl >= 0 ? "pos" : "neg"}`}>{signUsd(t.pnl)}</td>
+                      <td className={`num ${t.pnl >= 0 ? "pos" : "neg"}`}>{signPct(t.pnl_pct)}</td>
+                      <td>{t.exit_reason}</td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          )}
         </section>
 
-        {/* ---- Strategy card ---- */}
+        {/* ---------- strategy ---------- */}
         <section className="card span-12">
-          <h2>Strategy — exact rules ({STRATEGY_VERSION})</h2>
+          <h2>Strategy — identical rules on every instrument ({STRATEGY_VERSION})</h2>
           <ul className="rules">
-            <li>Symbol: <code>BTCUSDT</code> on <code>4h</code> candles (ETH/SOL implemented but disabled by config).</li>
-            <li>Indicators on 4h closes: <code>EMA21</code>, <code>EMA50</code>, <code>EMA200</code>, <code>RSI14</code>, <code>ATR14</code>.</li>
-            <li>Regime filter: <code>EMA50 &gt; EMA200</code> → longs only; <code>EMA50 &lt; EMA200</code> → shorts only.</li>
-            <li>Entry LONG: close crosses <em>above</em> EMA21 (crossover event) AND <code>RSI14 &gt; 52</code> AND bull regime AND no open position.</li>
-            <li>Entry SHORT: close crosses <em>below</em> EMA21 AND <code>RSI14 &lt; 48</code> AND bear regime AND no open position.</li>
+            <li>Indicators on each instrument&apos;s own bars: <code>EMA21</code>, <code>EMA50</code>, <code>EMA200</code>, <code>RSI14</code>, <code>ATR14</code>. Crypto uses 4h bars; US stocks use 1h, because a 6.5-hour session does not divide into 4h.</li>
+            <li>Regime: <code>EMA50 &gt; EMA200</code> → longs only; <code>EMA50 &lt; EMA200</code> → shorts only.</li>
+            <li>Entry LONG: close crosses <em>above</em> EMA21 AND <code>RSI14 &gt; 52</code> AND bull regime. SHORT mirrors it with <code>RSI14 &lt; 48</code>.</li>
             <li>Dead band: no trades while <code>48 ≤ RSI ≤ 52</code>.</li>
-            <li>Stop: entry ∓ <code>2.5 × ATR14</code>. Target: 3× the stop distance (1:3 RR). Max 1 open position.</li>
-            <li>Emergency exit: regime flips while a position is open → closed at the next evaluation.</li>
-            <li>Sizing: <code>qty = (equity × 0.015) / (2.5 × ATR14)</code> — 1.5% risk per trade.</li>
-            <li>Paper fills: entry at candle close + 0.05% slippage against direction; if a candle touches both stop and target, the stop is assumed to hit first (worst case); 0.1% fee per fill.</li>
-            <li>Risk engine: entries halt on daily loss ≥ 4%, 6 consecutive losses, or ≥ 10% drawdown from peak.</li>
+            <li>Stop: entry ∓ <code>2.5 × ATR14</code>. Target: 3× the stop distance. One position per instrument.</li>
+            <li>Size: <code>qty = (equity × 0.015) / (2.5 × ATR14)</code> — 1.5% of the shared account risked per trade, so a volatile instrument automatically gets a smaller position than a calm one.</li>
+            <li>Capital: one shared {usd(CONFIG.account.startingEquity)}. A signal is only taken if its notional fits the free balance; otherwise it is logged as missed.</li>
+            <li>Fills: entry at bar close + 0.05% slippage against the trade; if a bar touches both stop and target the stop is assumed first; a bar that <em>gaps</em> past the stop fills at the open, not the stop; 0.1% fee per fill.</li>
           </ul>
           <div className="disclaimer">
-            ⚠ PAPER TRADING — simulated fills on live market data. Educational project, not
-            financial advice. No real orders are placed and no exchange keys exist.
+            ⚠ PAPER TRADING — simulated fills on live market data. Educational project, not financial
+            advice. No real orders are placed and no broker or exchange keys exist.
           </div>
         </section>
       </div>
 
       <footer>
-        Data: Binance public REST · scheduler checks hourly, decisions only on closed 4h candles · all
-        times shown in Istanbul time ({tzLabel()}); candles and logs are stored in UTC
+        Crypto via Binance public REST · US stocks via Yahoo Finance · scheduler checks hourly,
+        decisions only on closed bars · times in Istanbul ({tzLabel()})
       </footer>
     </main>
   );
 }
 
-/* ---------------- data loading ---------------- */
+/* ---------------- data ---------------- */
 
-interface StateRow {
-  equity: number;
-  consecutive_losses: number;
-  halted: boolean;
-  halt_reason: string | null;
-  last_eval_at: Date | null;
-  last_candle_time: number | null;
-  last_error: string | null;
-}
-
-interface TradeRow {
-  id: number;
-  side: "long" | "short";
-  entry_time: Date;
-  entry_candle: number;
-  exit_candle: number | null;
-  entry_price: number;
-  exit_price: number;
-  qty: number;
-  entry_fee: number;
-  exit_fee: number;
-  pnl: number;
-  pnl_pct: number;
-  exit_reason: string;
-  strategy_version: string;
-}
-
-interface OpenTradeRow {
-  side: "long" | "short";
-  entry_time: Date;
-  entry_candle: number;
-  entry_price: number;
-  qty: number;
-  stop_price: number;
-  target_price: number;
-  entry_fee: number;
-  strategy_version: string;
-}
-
-async function loadDashboard() {
+async function load(selectedId: string) {
   const sql = db();
-  const [stateRows, openRows, tradeRows, snapRows, signalRows] = await Promise.all([
-    sql`SELECT * FROM bot_state WHERE id = 1`,
-    sql`SELECT * FROM trades WHERE status = 'open' ORDER BY id LIMIT 1`,
-    sql`SELECT * FROM trades WHERE status = 'closed' ORDER BY exit_candle DESC, id DESC LIMIT 300`,
-    sql`SELECT candle_time, equity FROM equity_snapshots ORDER BY id ASC LIMIT 2000`,
-    sql`SELECT id, created_at, candle_time, action, reason, details FROM signals ORDER BY id DESC LIMIT 12`,
-  ]);
 
-  const state: StateRow | null = stateRows.length
+  const [accountRows, stateRows, openRows, tradeRows, snapRows, signalRows, candleRows, missedRows] =
+    await Promise.all([
+      sql`SELECT * FROM account_state WHERE id = 1`,
+      sql`SELECT * FROM instrument_state`,
+      sql`SELECT * FROM trades WHERE status = 'open' ORDER BY id`,
+      sql`SELECT * FROM trades WHERE status = 'closed' AND strategy_version = ${STRATEGY_VERSION}
+          ORDER BY exit_candle DESC, id DESC LIMIT 300`,
+      sql`SELECT candle_time, equity FROM equity_snapshots
+          WHERE strategy_version = ${STRATEGY_VERSION} ORDER BY id ASC LIMIT 3000`,
+      sql`SELECT id, created_at, candle_time, action, reason, details FROM signals
+          WHERE instrument_id = ${selectedId} ORDER BY id DESC LIMIT 12`,
+      sql`SELECT open_time, open, high, low, close FROM candles
+          WHERE symbol = ${selectedId} ORDER BY open_time ASC`,
+      sql`SELECT * FROM missed_opportunities ORDER BY id DESC LIMIT 50`,
+    ]);
+
+  const account = accountRows.length
     ? {
-        equity: Number(stateRows[0].equity),
-        consecutive_losses: Number(stateRows[0].consecutive_losses),
-        halted: Boolean(stateRows[0].halted),
-        halt_reason: stateRows[0].halt_reason,
-        last_eval_at: stateRows[0].last_eval_at,
-        last_candle_time:
-          stateRows[0].last_candle_time === null ? null : Number(stateRows[0].last_candle_time),
-        last_error: stateRows[0].last_error,
+        realized_equity: Number(accountRows[0].realized_equity),
+        consecutive_losses: Number(accountRows[0].consecutive_losses),
+        halted: Boolean(accountRows[0].halted),
+        halt_reason: accountRows[0].halt_reason as string | null,
+        last_eval_at: accountRows[0].last_eval_at as Date | null,
       }
     : null;
 
-  const openTrade: OpenTradeRow | null = openRows.length
-    ? {
-        side: openRows[0].side,
-        entry_time: openRows[0].entry_time,
-        entry_candle: Number(openRows[0].entry_candle),
-        entry_price: Number(openRows[0].entry_price),
-        qty: Number(openRows[0].qty),
-        stop_price: Number(openRows[0].stop_price),
-        target_price: Number(openRows[0].target_price),
-        entry_fee: Number(openRows[0].entry_fee),
-        strategy_version: openRows[0].strategy_version,
-      }
-    : null;
+  const states = new Map(
+    stateRows.map((r) => [
+      String(r.instrument_id),
+      { warming_up: Boolean(r.warming_up), candles_seen: Number(r.candles_seen) },
+    ])
+  );
 
-  const trades: TradeRow[] = tradeRows.map((r) => ({
+  const lastCloseRows = await sql`
+    SELECT DISTINCT ON (symbol) symbol, close FROM candles ORDER BY symbol, open_time DESC`;
+  const lastClose = new Map(lastCloseRows.map((r) => [String(r.symbol), Number(r.close)]));
+
+  const openPositions = openRows.map((r) => {
+    const side = r.side as "long" | "short";
+    const entry = Number(r.entry_price);
+    const qty = Number(r.qty);
+    const mark = lastClose.get(String(r.instrument_id)) ?? entry;
+    return {
+      id: Number(r.id),
+      instrument_id: String(r.instrument_id),
+      side,
+      entry_time: r.entry_time as Date,
+      entry_candle: Number(r.entry_candle),
+      entry_price: entry,
+      qty,
+      stop_price: Number(r.stop_price),
+      target_price: Number(r.target_price),
+      entry_fee: Number(r.entry_fee),
+      notional: Number(r.notional ?? entry * qty),
+      unrealized: (side === "long" ? 1 : -1) * (mark - entry) * qty,
+    };
+  });
+
+  const trades = tradeRows.map((r) => ({
     id: Number(r.id),
-    side: r.side,
-    entry_time: r.entry_time,
+    instrument_id: String(r.instrument_id),
+    side: r.side as "long" | "short",
+    entry_time: r.entry_time as Date,
     entry_candle: Number(r.entry_candle),
     exit_candle: r.exit_candle === null ? null : Number(r.exit_candle),
     entry_price: Number(r.entry_price),
     exit_price: Number(r.exit_price),
     qty: Number(r.qty),
+    notional: Number(r.notional ?? Number(r.entry_price) * Number(r.qty)),
     entry_fee: Number(r.entry_fee),
     exit_fee: Number(r.exit_fee),
     pnl: Number(r.pnl),
     pnl_pct: Number(r.pnl_pct),
     exit_reason: String(r.exit_reason),
-    strategy_version: r.strategy_version,
   }));
 
-  const snapshots = snapRows.map((r) => ({
-    candle_time: Number(r.candle_time),
-    equity: Number(r.equity),
-  }));
-
-  const signals = signalRows.map((r) => ({
-    id: Number(r.id),
-    created_at: r.created_at as Date,
-    candle_time: r.candle_time === null ? null : Number(r.candle_time),
-    action: String(r.action),
-    reason: String(r.reason),
-    details: (r.details ?? null) as EvalDetails | null,
-  }));
-
-  // Full stored series: indicators need the long warmup even though only the
-  // recent window is drawn.
-  const candleRows = await sql`
-    SELECT open_time, open, high, low, close FROM candles
-    WHERE symbol = ${CONFIG.symbols[0].symbol} ORDER BY open_time ASC
-  `;
-  const priceSeries = buildPriceSeries(candleRows);
-  const lastPrice = priceSeries.length ? priceSeries[priceSeries.length - 1].c : null;
-
-  const markers: TradeMarker[] = [];
-  for (const t of trades) {
-    markers.push({ t: t.entry_candle, kind: "entry", side: t.side, price: t.entry_price });
-    if (t.exit_candle !== null) {
-      markers.push({ t: t.exit_candle, kind: "exit", side: t.side, price: t.exit_price });
-    }
-  }
-  if (openTrade) {
-    markers.push({
-      t: openTrade.entry_candle,
-      kind: "entry",
-      side: openTrade.side,
-      price: openTrade.entry_price,
-    });
-  }
-
-  return { state, openTrade, trades, snapshots, signals, lastPrice, priceSeries, markers };
+  return {
+    account,
+    states,
+    openPositions,
+    trades,
+    snapshots: snapRows.map((r) => ({ candle_time: Number(r.candle_time), equity: Number(r.equity) })),
+    signals: signalRows.map((r) => ({
+      id: Number(r.id),
+      created_at: r.created_at as Date,
+      candle_time: r.candle_time === null ? null : Number(r.candle_time),
+      action: String(r.action),
+      reason: String(r.reason),
+      details: (r.details ?? null) as EvalDetails | null,
+    })),
+    priceSeries: buildPriceSeries(candleRows),
+    missed: missedRows.map((r) => ({
+      id: Number(r.id),
+      created_at: r.created_at as Date,
+      instrument_id: String(r.instrument_id),
+      side: r.side as "long" | "short",
+      entry_price: Number(r.entry_price),
+      wanted_notional: Number(r.wanted_notional),
+      available_capital: Number(r.available_capital),
+    })),
+  };
 }
 
-/** Candle rows -> chart points with the strategy's indicators attached. */
 function buildPriceSeries(rows: readonly Record<string, unknown>[]): PricePoint[] {
   const candles = rows.map((r) => ({
     t: Number(r.open_time),
@@ -440,49 +491,47 @@ function buildPriceSeries(rows: readonly Record<string, unknown>[]): PricePoint[
     c: Number(r.close),
   }));
   if (candles.length === 0) return [];
-
   const closes = candles.map((c) => c.c);
   const e21 = ema(closes, CONFIG.indicators.emaFast);
   const e50 = ema(closes, CONFIG.indicators.emaMid);
   const e200 = ema(closes, CONFIG.indicators.emaSlow);
   const r14 = rsi(closes, CONFIG.indicators.rsiPeriod);
-
-  return candles.map((c, i) => ({
-    ...c,
-    ema21: e21[i],
-    ema50: e50[i],
-    ema200: e200[i],
-    rsi: r14[i],
-  }));
+  return candles.map((c, i) => ({ ...c, ema21: e21[i], ema50: e50[i], ema200: e200[i], rsi: r14[i] }));
 }
 
-/* ---------------- presentation helpers ---------------- */
+/* ---------------- presentation ---------------- */
 
 function Header() {
   return (
     <div className="topbar">
       <h1>
-        PaperTrade BTC
+        PaperTrade
         <span className="paper-badge">Paper trading</span>
       </h1>
-      <span className="muted" style={{ fontSize: 13 }}>
-        BTCUSDT · 4h · public &amp; read-only · times in {tzLabel()}
-      </span>
+      <span className="muted" style={{ fontSize: 13 }}>public &amp; read-only · times in {tzLabel()}</span>
     </div>
   );
 }
 
-function OpenPositionCard({ trade, lastPrice }: { trade: OpenTradeRow; lastPrice: number | null }) {
-  const pnl = openTradePnl(trade, lastPrice);
+function AccountStat({ label, value, sub, tone }: { label: string; value: string; sub?: string; tone?: "pos" | "neg" }) {
   return (
-    <>
-      <div className="hero-number" style={{ fontSize: 22 }}>
-        <SideBadge side={trade.side} /> @ {px(trade.entry_price)}
-      </div>
-      <div className="hero-sub">
-        P/L <span className={pnl >= 0 ? "pos" : "neg"}>{signUsd(pnl)}</span> · stop {px(trade.stop_price)} · target {px(trade.target_price)}
-      </div>
-    </>
+    <div className="account-stat">
+      <div className="account-label">{label}</div>
+      <div className={`account-value ${tone ?? ""}`}>{value}</div>
+      {sub && <div className="account-sub">{sub}</div>}
+    </div>
+  );
+}
+
+function Row({ k, v, dot }: { k: string; v: string; dot?: string }) {
+  return (
+    <div className="stat-row">
+      <span className="k">{k}</span>
+      <span className="num">
+        {dot && <span className="status-dot" style={{ background: dot }} />}
+        {v}
+      </span>
+    </div>
   );
 }
 
@@ -490,40 +539,24 @@ function SideBadge({ side }: { side: "long" | "short" }) {
   return <span className={`side-badge side-${side}`}>{side}</span>;
 }
 
-function openTradePnl(t: OpenTradeRow, lastPrice: number | null): number {
-  if (lastPrice === null) return 0;
-  const dir = t.side === "long" ? 1 : -1;
-  return dir * (lastPrice - t.entry_price) * t.qty;
-}
-
-function actionColor(action: string): string {
-  if (action.startsWith("entry")) return "var(--accent)";
-  if (action === "exit") return "var(--ink)";
-  if (action === "error" || action === "halt") return "var(--bad)";
-  return "var(--ink-3)";
-}
-
 function usd(v: number): string {
   return `$${v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
-
 function signUsd(v: number): string {
   return `${v >= 0 ? "+" : "−"}$${Math.abs(v).toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 })}`;
 }
-
 function signPct(v: number): string {
   return `${v >= 0 ? "+" : "−"}${Math.abs(v).toFixed(2)}%`;
 }
-
-function px(v: number): string {
-  return v.toLocaleString("en-US", { minimumFractionDigits: 2, maximumFractionDigits: 2 });
+/** Sub-dollar instruments need more decimals than BTC does. */
+function px(v: number, instrumentId: string): string {
+  const small = v < 10 || instrumentId === "SUIUSDT" || instrumentId === "HBARUSDT" || instrumentId === "XRPUSDT";
+  return v.toLocaleString("en-US", {
+    minimumFractionDigits: small ? 4 : 2,
+    maximumFractionDigits: small ? 6 : 2,
+  });
 }
-
 function streakLabel(streak: number): string {
   if (streak === 0) return "—";
   return streak > 0 ? `${streak} win${streak > 1 ? "s" : ""}` : `${-streak} loss${streak < -1 ? "es" : ""}`;
-}
-
-function ts(d: Date): string {
-  return fmtDateTime(d);
 }

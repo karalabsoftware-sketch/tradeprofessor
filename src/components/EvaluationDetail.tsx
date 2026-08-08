@@ -47,6 +47,9 @@ interface Props {
   evaluatedAt: Date | null;
   /** True when the scheduler is overdue — this decision may be stale. */
   stale?: boolean;
+  /** Bar length for THIS instrument — crypto is 4h, US equities are 1h. */
+  intervalMs: number;
+  intervalLabel: string;
 }
 
 export default function EvaluationDetail({
@@ -56,6 +59,8 @@ export default function EvaluationDetail({
   details,
   evaluatedAt,
   stale,
+  intervalMs,
+  intervalLabel,
 }: Props) {
   const g = details?.gates;
   const ind = details?.indicators;
@@ -69,7 +74,7 @@ export default function EvaluationDetail({
             {candleTime ? (
               <>
                 Candle <strong>{fmtDateTime(candleTime)}</strong> →{" "}
-                <strong>{fmtDateTime(candleTime + CONFIG.intervalMs)}</strong>
+                <strong>{fmtDateTime(candleTime + intervalMs)}</strong>
                 {" · decision taken at the close"}
               </>
             ) : (
@@ -145,7 +150,7 @@ export default function EvaluationDetail({
       )}
 
       {g && !traded && action !== "error" && (
-        <MissingConditions gates={g} details={details} />
+        <MissingConditions gates={g} details={details} intervalLabel={intervalLabel} />
       )}
 
       {details?.exits && details.exits.length > 0 && (
@@ -158,7 +163,15 @@ export default function EvaluationDetail({
 }
 
 /** Forward-looking: what has to change before a trade can happen. */
-function MissingConditions({ gates: g, details }: { gates: EvalGates; details: EvalDetails | null }) {
+function MissingConditions({
+  gates: g,
+  details,
+  intervalLabel,
+}: {
+  gates: EvalGates;
+  details: EvalDetails | null;
+  intervalLabel: string;
+}) {
   if (!g.warmedUp) return null;
 
   const items: string[] = [];
@@ -210,7 +223,7 @@ function MissingConditions({ gates: g, details }: { gates: EvalGates; details: E
       {g.flat && g.notHalted && g.allowedSide && (
         <p className="eval-reason" style={{ marginTop: 0, marginBottom: 6 }}>
           In the current {g.regime} regime the bot can only open a{" "}
-          <strong>{g.allowedSide.toUpperCase()}</strong>. For that, on some future 4h close:
+          <strong>{g.allowedSide.toUpperCase()}</strong>. For that, on some future {intervalLabel} close:
         </p>
       )}
       <ul className="missing-list">

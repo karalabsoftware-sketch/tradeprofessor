@@ -36,29 +36,62 @@ describe("checkPriceExit — conservative same-candle rule", () => {
   const long = { side: "long" as const, entryPrice: 100, qty: 1, stopPrice: 95, targetPrice: 115 };
 
   it("assumes STOP first when a candle touches both stop and target", () => {
-    const fill = checkPriceExit(long, { high: 120, low: 90, close: 110 });
+    const fill = checkPriceExit(long, { open: 100, high: 120, low: 90, close: 110 });
     expect(fill?.reason).toBe("stop");
     expect(fill?.price).toBeCloseTo(95 * (1 - SLIP), 10);
   });
 
   it("fills target exactly when only the target is touched", () => {
-    const fill = checkPriceExit(long, { high: 116, low: 99, close: 114 });
+    const fill = checkPriceExit(long, { open: 100, high: 116, low: 99, close: 114 });
     expect(fill?.reason).toBe("target");
     expect(fill?.price).toBe(115);
   });
 
   it("returns null when neither level is touched", () => {
-    expect(checkPriceExit(long, { high: 110, low: 96, close: 105 })).toBeNull();
+    expect(checkPriceExit(long, { open: 100, high: 110, low: 96, close: 105 })).toBeNull();
   });
 
   it("short: stop is above, slippage pushes the stop fill higher (worse)", () => {
     const short = { side: "short" as const, entryPrice: 100, qty: 1, stopPrice: 105, targetPrice: 85 };
-    const both = checkPriceExit(short, { high: 106, low: 84, close: 90 });
+    const both = checkPriceExit(short, { open: 100, high: 106, low: 84, close: 90 });
     expect(both?.reason).toBe("stop");
     expect(both?.price).toBeCloseTo(105 * (1 + SLIP), 10);
-    const target = checkPriceExit(short, { high: 101, low: 84, close: 86 });
+    const target = checkPriceExit(short, { open: 100, high: 101, low: 84, close: 86 });
     expect(target?.reason).toBe("target");
     expect(target?.price).toBe(85);
+  });
+});
+
+describe("checkPriceExit — overnight gaps (US equities)", () => {
+  const long = { side: "long" as const, entryPrice: 100, qty: 1, stopPrice: 95, targetPrice: 115 };
+  const short = { side: "short" as const, entryPrice: 100, qty: 1, stopPrice: 105, targetPrice: 85 };
+
+  it("fills a gapped-down long at the OPEN, not at the stop", () => {
+    // Bar opens at 88, far below the 95 stop: there was never a chance to
+    // trade at 95, so claiming that fill would flatter the results.
+    const fill = checkPriceExit(long, { open: 88, high: 92, low: 85, close: 90 });
+    expect(fill?.reason).toBe("stop");
+    expect(fill?.price).toBeCloseTo(88 * (1 - SLIP), 10);
+    expect(fill!.price).toBeLessThan(95); // strictly worse than the stop price
+  });
+
+  it("fills a gapped-up short at the OPEN, not at the stop", () => {
+    const fill = checkPriceExit(short, { open: 112, high: 115, low: 110, close: 113 });
+    expect(fill?.reason).toBe("stop");
+    expect(fill?.price).toBeCloseTo(112 * (1 + SLIP), 10);
+    expect(fill!.price).toBeGreaterThan(105);
+  });
+
+  it("does not use the open when the bar opens inside the range", () => {
+    const fill = checkPriceExit(long, { open: 99, high: 101, low: 94, close: 96 });
+    expect(fill?.price).toBeCloseTo(95 * (1 - SLIP), 10); // normal stop fill
+  });
+
+  it("keeps favourable gaps conservative — a target still fills at the target", () => {
+    // Opens above the target; a real limit might fill better, we do not assume it.
+    const fill = checkPriceExit(long, { open: 118, high: 122, low: 117, close: 120 });
+    expect(fill?.reason).toBe("target");
+    expect(fill?.price).toBe(115);
   });
 });
 

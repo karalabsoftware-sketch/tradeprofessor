@@ -61,8 +61,8 @@ describe("fill params defaults", () => {
     expect(a).toEqual(b);
 
     const pos = { side: "long" as const, entryPrice: 100, qty: 1, stopPrice: 95, targetPrice: 115 };
-    expect(checkPriceExit(pos, { high: 120, low: 90, close: 110 })).toEqual(
-      checkPriceExit(pos, { high: 120, low: 90, close: 110 }, DEFAULT_FILL_PARAMS)
+    expect(checkPriceExit(pos, { open: 100, high: 120, low: 90, close: 110 })).toEqual(
+      checkPriceExit(pos, { open: 100, high: 120, low: 90, close: 110 }, DEFAULT_FILL_PARAMS)
     );
     expect(settleClose(pos, 110, 0.2)).toEqual(settleClose(pos, 110, 0.2, DEFAULT_FILL_PARAMS));
   });

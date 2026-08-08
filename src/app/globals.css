@@ -310,6 +310,154 @@ tr:last-child td { border-bottom: none; }
 .gate-neutral .gate-mark { color: var(--ink-2); }
 .gate-fail .gate-label { color: var(--ink); }
 
+/* ---- shared account bar ---- */
+
+.account-bar {
+  display: grid;
+  grid-template-columns: repeat(4, 1fr);
+  gap: 12px;
+  margin-top: 12px;
+}
+
+@media (max-width: 700px) {
+  .account-bar { grid-template-columns: repeat(2, 1fr); }
+}
+
+.account-stat {
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: 12px;
+  padding: 14px 16px;
+}
+
+.account-label {
+  font-size: 11px;
+  letter-spacing: 0.07em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+}
+
+.account-value {
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 3px;
+  line-height: 1.15;
+}
+
+.account-sub { font-size: 12px; color: var(--ink-2); margin-top: 3px; }
+
+.capital-bar {
+  height: 6px;
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 999px;
+  overflow: hidden;
+  margin-top: 10px;
+}
+
+.capital-bar-fill {
+  height: 100%;
+  background: var(--accent);
+  transition: width 0.3s ease;
+}
+
+.capital-note {
+  font-size: 12px;
+  color: var(--ink-2);
+  margin-top: 6px;
+  line-height: 1.5;
+}
+
+/* ---- venue + instrument navigation ---- */
+
+.venue-nav {
+  margin-top: 18px;
+  display: flex;
+  flex-direction: column;
+  gap: 12px;
+}
+
+.venue-title {
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.09em;
+  text-transform: uppercase;
+  color: var(--ink-2);
+  margin-bottom: 7px;
+}
+
+.chip-row { display: flex; flex-wrap: wrap; gap: 8px; }
+
+.chip {
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+  padding: 7px 12px;
+  border-radius: 999px;
+  border: 1px solid var(--border);
+  background: var(--surface);
+  color: var(--ink-2);
+  text-decoration: none;
+  font-size: 13px;
+  transition: border-color 0.15s, background 0.15s, color 0.15s;
+}
+
+.chip:hover { border-color: var(--ink-3); color: var(--ink); }
+
+.chip-active {
+  border-color: var(--accent);
+  background: color-mix(in srgb, var(--accent) 14%, var(--surface));
+  color: var(--ink);
+}
+
+.chip-id { font-weight: 700; font-family: var(--mono); font-size: 12px; }
+.chip-label { color: var(--ink-2); font-size: 12px; }
+.chip-active .chip-label { color: var(--ink); }
+
+.chip-dot {
+  width: 7px;
+  height: 7px;
+  border-radius: 50%;
+  background: var(--good);
+}
+
+.chip-warming { opacity: 0.6; }
+
+.chip-warm {
+  font-size: 10px;
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+  color: var(--warn);
+}
+
+/* ---- selected instrument header ---- */
+
+.inst-head {
+  display: flex;
+  justify-content: space-between;
+  align-items: flex-start;
+  gap: 14px;
+  flex-wrap: wrap;
+}
+
+.inst-title { font-size: 20px; font-weight: 700; }
+.inst-pos { text-align: right; font-size: 14px; }
+
+@media (max-width: 620px) {
+  .inst-pos { text-align: left; }
+}
+
+.warm-note {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: 8px;
+  border: 1px solid color-mix(in srgb, var(--warn) 45%, transparent);
+  background: color-mix(in srgb, var(--warn) 9%, transparent);
+  font-size: 13px;
+  color: var(--ink-2);
+}
+
 /* ---- price chart ---- */
 
 .chart-legend {

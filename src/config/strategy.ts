@@ -5,13 +5,20 @@
  */
 
 /**
- * v1.0.1 — the trading RULES are unchanged from v1.0.0. Only the indicator
- * warmup was fixed (see `fetchLimit`). The version is still bumped because the
- * fix changes which regime the bot sees on roughly a third of candles, so
- * decisions differ materially and results from the two versions must never be
- * pooled.
+ * Version history — results from different versions are never pooled.
+ *
+ * v1.0.0  BTCUSDT 4h only.
+ * v1.0.1  Same rules; fixed the EMA200 warmup (fetchLimit 320 -> 1000). The
+ *         old window left ~30% of EMA200 as its seed, inverting the bull/bear
+ *         regime on 36% of candles.
+ * v1.1.0  Same entry/exit rules, applied to twelve instruments across two
+ *         venues, sharing ONE $10,000 account. Position sizing is unchanged
+ *         (1.5% risk), but a signal can now go untaken when capital is fully
+ *         deployed — those refusals are recorded in `missed_opportunities`.
+ *         Stop fills became gap-aware, which matters for equities that gap
+ *         overnight and can only ever make results more conservative.
  */
-export const STRATEGY_VERSION = "btc-4h-trend-v1.0.1";
+export const STRATEGY_VERSION = "multi-trend-v1.1.0";
 
 export interface SymbolConfig {
   symbol: string;
