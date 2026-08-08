@@ -376,24 +376,72 @@ export default async function Dashboard({
 
 /* ---------------- data ---------------- */
 
+type Json = Record<string, unknown>;
+
+/** Shape of the single json_build_object the page fetches. */
+interface RawPayload {
+  account: Json | null;
+  states: Json[];
+  open_trades: Json[];
+  closed_trades: Json[];
+  snapshots: Json[];
+  signals: Json[];
+  candles: Json[];
+  missed: Json[];
+  last_close: Record<string, number>;
+}
+
+/**
+ * The whole page in ONE round trip.
+ *
+ * This used to be nine queries. Against Supabase's free-tier pooler that was
+ * enough concurrent connections to intermittently exhaust it: roughly half of
+ * all page loads hung until the client gave up, and which instrument you had
+ * selected made no difference. Collapsing everything into a single
+ * json_build_object removes the contention entirely — one connection, one
+ * statement, one result.
+ */
 async function load(selectedId: string) {
   const sql = db();
 
-  const [accountRows, stateRows, openRows, tradeRows, snapRows, signalRows, candleRows, missedRows] =
-    await Promise.all([
-      sql`SELECT * FROM account_state WHERE id = 1`,
-      sql`SELECT * FROM instrument_state`,
-      sql`SELECT * FROM trades WHERE status = 'open' ORDER BY id`,
-      sql`SELECT * FROM trades WHERE status = 'closed' AND strategy_version = ${STRATEGY_VERSION}
-          ORDER BY exit_candle DESC, id DESC LIMIT 300`,
-      sql`SELECT candle_time, equity FROM equity_snapshots
-          WHERE strategy_version = ${STRATEGY_VERSION} ORDER BY id ASC LIMIT 3000`,
-      sql`SELECT id, created_at, candle_time, action, reason, details FROM signals
-          WHERE instrument_id = ${selectedId} ORDER BY id DESC LIMIT 12`,
-      sql`SELECT open_time, open, high, low, close FROM candles
-          WHERE symbol = ${selectedId} ORDER BY open_time ASC`,
-      sql`SELECT * FROM missed_opportunities ORDER BY id DESC LIMIT 50`,
-    ]);
+  const [{ payload }] = await sql<{ payload: RawPayload }[]>`
+    SELECT json_build_object(
+      'account', (SELECT row_to_json(a) FROM account_state a WHERE a.id = 1),
+      'states', (SELECT coalesce(json_agg(s), '[]'::json) FROM instrument_state s),
+      'open_trades', (SELECT coalesce(json_agg(t ORDER BY t.id), '[]'::json)
+                      FROM trades t WHERE t.status = 'open'),
+      'closed_trades', (SELECT coalesce(json_agg(x), '[]'::json) FROM (
+          SELECT * FROM trades
+          WHERE status = 'closed' AND strategy_version = ${STRATEGY_VERSION}
+          ORDER BY exit_candle DESC, id DESC LIMIT 300) x),
+      'snapshots', (SELECT coalesce(json_agg(y ORDER BY y.id), '[]'::json) FROM (
+          SELECT id, candle_time, equity FROM equity_snapshots
+          WHERE strategy_version = ${STRATEGY_VERSION} ORDER BY id DESC LIMIT 3000) y),
+      'signals', (SELECT coalesce(json_agg(z ORDER BY z.id DESC), '[]'::json) FROM (
+          SELECT id, created_at, candle_time, action, reason, details FROM signals
+          WHERE instrument_id = ${selectedId} ORDER BY id DESC LIMIT 12) z),
+      'candles', (SELECT coalesce(json_agg(c ORDER BY c.open_time), '[]'::json) FROM (
+          SELECT open_time, open, high, low, close FROM candles
+          WHERE symbol = ${selectedId} ORDER BY open_time DESC LIMIT 1200) c),
+      'missed', (SELECT coalesce(json_agg(m ORDER BY m.id DESC), '[]'::json) FROM (
+          SELECT * FROM missed_opportunities ORDER BY id DESC LIMIT 50) m),
+      'last_close', (SELECT coalesce(json_object_agg(l.symbol, l.close), '{}'::json) FROM (
+          SELECT DISTINCT ON (symbol) symbol, close FROM candles
+          ORDER BY symbol, open_time DESC) l)
+    ) AS payload
+  `;
+
+  const accountRows = payload.account ? [payload.account] : [];
+  const stateRows = payload.states;
+  const openRows = payload.open_trades;
+  const tradeRows = payload.closed_trades;
+  const snapRows = payload.snapshots;
+  const signalRows = payload.signals;
+  const candleRows = payload.candles;
+  const missedRows = payload.missed;
+  const lastClose = new Map<string, number>(
+    Object.entries(payload.last_close).map(([k, v]) => [k, Number(v)])
+  );
 
   const account = accountRows.length
     ? {
@@ -401,7 +449,7 @@ async function load(selectedId: string) {
         consecutive_losses: Number(accountRows[0].consecutive_losses),
         halted: Boolean(accountRows[0].halted),
         halt_reason: accountRows[0].halt_reason as string | null,
-        last_eval_at: accountRows[0].last_eval_at as Date | null,
+        last_eval_at: asDate(accountRows[0].last_eval_at),
       }
     : null;
 
@@ -412,10 +460,6 @@ async function load(selectedId: string) {
     ])
   );
 
-  const lastCloseRows = await sql`
-    SELECT DISTINCT ON (symbol) symbol, close FROM candles ORDER BY symbol, open_time DESC`;
-  const lastClose = new Map(lastCloseRows.map((r) => [String(r.symbol), Number(r.close)]));
-
   const openPositions = openRows.map((r) => {
     const side = r.side as "long" | "short";
     const entry = Number(r.entry_price);
@@ -425,7 +469,7 @@ async function load(selectedId: string) {
       id: Number(r.id),
       instrument_id: String(r.instrument_id),
       side,
-      entry_time: r.entry_time as Date,
+      entry_time: asDate(r.entry_time) as Date,
       entry_candle: Number(r.entry_candle),
       entry_price: entry,
       qty,
@@ -441,9 +485,9 @@ async function load(selectedId: string) {
     id: Number(r.id),
     instrument_id: String(r.instrument_id),
     side: r.side as "long" | "short",
-    entry_time: r.entry_time as Date,
+    entry_time: asDate(r.entry_time) as Date,
     entry_candle: Number(r.entry_candle),
-    exit_candle: r.exit_candle === null ? null : Number(r.exit_candle),
+    exit_candle: r.exit_candle === null || r.exit_candle === undefined ? null : Number(r.exit_candle),
     entry_price: Number(r.entry_price),
     exit_price: Number(r.exit_price),
     qty: Number(r.qty),
@@ -463,8 +507,8 @@ async function load(selectedId: string) {
     snapshots: snapRows.map((r) => ({ candle_time: Number(r.candle_time), equity: Number(r.equity) })),
     signals: signalRows.map((r) => ({
       id: Number(r.id),
-      created_at: r.created_at as Date,
-      candle_time: r.candle_time === null ? null : Number(r.candle_time),
+      created_at: asDate(r.created_at) as Date,
+      candle_time: r.candle_time === null || r.candle_time === undefined ? null : Number(r.candle_time),
       action: String(r.action),
       reason: String(r.reason),
       details: (r.details ?? null) as EvalDetails | null,
@@ -472,7 +516,7 @@ async function load(selectedId: string) {
     priceSeries: buildPriceSeries(candleRows),
     missed: missedRows.map((r) => ({
       id: Number(r.id),
-      created_at: r.created_at as Date,
+      created_at: asDate(r.created_at) as Date,
       instrument_id: String(r.instrument_id),
       side: r.side as "long" | "short",
       entry_price: Number(r.entry_price),
@@ -480,6 +524,12 @@ async function load(selectedId: string) {
       available_capital: Number(r.available_capital),
     })),
   };
+}
+
+/** JSON has no date type, so timestamps arrive as ISO strings. */
+function asDate(v: unknown): Date | null {
+  if (v === null || v === undefined) return null;
+  return v instanceof Date ? v : new Date(String(v));
 }
 
 function buildPriceSeries(rows: readonly Record<string, unknown>[]): PricePoint[] {

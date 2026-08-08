@@ -17,7 +17,10 @@ export function db(): Sql {
     if (!url) throw new Error("DATABASE_URL is not set");
     sql = postgres(url, {
       ssl: "require",
-      max: 5,
+      // Serverless: many short-lived instances share Supabase's free-tier
+      // pooler, so a big per-instance pool starves everyone. The dashboard
+      // now needs one connection (single query) and the engine batches too.
+      max: 3,
       prepare: false,
       idle_timeout: 20,
       connect_timeout: 10,
