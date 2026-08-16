@@ -1,4 +1,4 @@
-"use client";
+﻿"use client";
 
 import { useMemo, useRef, useState } from "react";
 import { fmtDate, fmtDateTimeTz } from "@/lib/format";
@@ -21,9 +21,16 @@ export default function EquityChart({ points, baseline }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
 
+  // A single non-finite value would poison min/max and blank the whole chart.
+  // One bad row should cost one point, not the entire curve.
+  const clean = useMemo(
+    () => points.filter((p) => Number.isFinite(p.equity) && Number.isFinite(p.t)),
+    [points]
+  );
+
   const model = useMemo(() => {
-    if (points.length === 0) return null;
-    const values = points.map((p) => p.equity).concat(baseline);
+    if (clean.length === 0) return null;
+    const values = clean.map((p) => p.equity).concat(baseline);
     const min = Math.min(...values);
     const max = Math.max(...values);
     const span = max - min || 1;
@@ -31,13 +38,13 @@ export default function EquityChart({ points, baseline }: Props) {
     const hi = max + span * 0.08;
 
     const x = (i: number) =>
-      points.length === 1
+      clean.length === 1
         ? (PAD.left + W - PAD.right) / 2
-        : PAD.left + (i / (points.length - 1)) * (W - PAD.left - PAD.right);
+        : PAD.left + (i / (clean.length - 1)) * (W - PAD.left - PAD.right);
     const y = (v: number) => PAD.top + (1 - (v - lo) / (hi - lo)) * (H - PAD.top - PAD.bottom);
 
-    const line = points.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(p.equity).toFixed(2)}`).join("");
-    const area = `${line}L${x(points.length - 1).toFixed(2)},${H - PAD.bottom}L${x(0).toFixed(2)},${H - PAD.bottom}Z`;
+    const line = clean.map((p, i) => `${i === 0 ? "M" : "L"}${x(i).toFixed(2)},${y(p.equity).toFixed(2)}`).join("");
+    const area = `${line}L${x(clean.length - 1).toFixed(2)},${H - PAD.bottom}L${x(0).toFixed(2)},${H - PAD.bottom}Z`;
 
     const ticks = [lo + (hi - lo) * 0.15, (lo + hi) / 2, lo + (hi - lo) * 0.85].map((v) => ({
       v,
@@ -45,9 +52,9 @@ export default function EquityChart({ points, baseline }: Props) {
     }));
 
     return { x, y, line, area, ticks, lo, hi };
-  }, [points, baseline]);
+  }, [clean, baseline]);
 
-  if (!model || points.length < 2) {
+  if (!model || clean.length < 2) {
     return <p className="muted" style={{ fontSize: 13 }}>Not enough equity snapshots yet — the curve appears after a few evaluations.</p>;
   }
 
@@ -56,11 +63,11 @@ export default function EquityChart({ points, baseline }: Props) {
     if (!rect) return;
     const px = ((e.clientX - rect.left) / rect.width) * W;
     const frac = (px - PAD.left) / (W - PAD.left - PAD.right);
-    const i = Math.round(frac * (points.length - 1));
-    setHover(Math.max(0, Math.min(points.length - 1, i)));
+    const i = Math.round(frac * (clean.length - 1));
+    setHover(Math.max(0, Math.min(clean.length - 1, i)));
   };
 
-  const h = hover !== null ? points[hover] : null;
+  const h = hover !== null ? clean[hover] : null;
   const hx = hover !== null ? model.x(hover) : 0;
   const hy = h ? model.y(h.equity) : 0;
 
@@ -101,10 +108,10 @@ export default function EquityChart({ points, baseline }: Props) {
         <path d={model.line} fill="none" stroke="var(--accent)" strokeWidth="2" strokeLinejoin="round" />
 
         <text x={PAD.left} y={H - 8} textAnchor="start" fontSize="11" fill="var(--ink-2)">
-          {fmtDate(points[0].t)}
+          {fmtDate(clean[0].t)}
         </text>
         <text x={W - PAD.right} y={H - 8} textAnchor="end" fontSize="11" fill="var(--ink-2)">
-          {fmtDate(points[points.length - 1].t)}
+          {fmtDate(clean[clean.length - 1].t)}
         </text>
 
         {h && (
@@ -121,7 +128,7 @@ export default function EquityChart({ points, baseline }: Props) {
             position: "absolute",
             left: `${(hx / W) * 100}%`,
             top: 0,
-            transform: `translateX(${hover! > points.length / 2 ? "calc(-100% - 10px)" : "10px"})`,
+            transform: `translateX(${hover! > clean.length / 2 ? "calc(-100% - 10px)" : "10px"})`,
             background: "var(--surface-2)",
             border: "1px solid var(--border)",
             borderRadius: 8,
@@ -140,4 +147,5 @@ export default function EquityChart({ points, baseline }: Props) {
     </div>
   );
 }
+
 

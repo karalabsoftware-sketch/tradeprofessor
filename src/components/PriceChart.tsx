@@ -37,6 +37,8 @@ interface Props {
   markers?: TradeMarker[];
   /** Candle the most recent decision was taken on — highlighted. */
   latestDecisionT?: number | null;
+  /** For the accessible label, e.g. "NVDA 1d". */
+  title?: string;
 }
 
 const W = 920;
@@ -48,7 +50,7 @@ const PAD = { left: 62, right: 12, top: 12, bottom: 22 };
 
 const EMA_COLORS = { ema21: "#5aa9ff", ema50: "#e8b44a", ema200: "#b98cff" };
 
-export default function PriceChart({ points, markers = [], latestDecisionT }: Props) {
+export default function PriceChart({ points, markers = [], latestDecisionT, title = "Price" }: Props) {
   const svgRef = useRef<SVGSVGElement>(null);
   const [hover, setHover] = useState<number | null>(null);
 
@@ -158,7 +160,7 @@ export default function PriceChart({ points, markers = [], latestDecisionT }: Pr
         onPointerMove={onMove}
         onPointerLeave={() => setHover(null)}
         role="img"
-        aria-label="BTCUSDT 4h price with EMA21, EMA50, EMA200 and RSI14"
+        aria-label={`${title} price with EMA21, EMA50, EMA200 and RSI14`}
       >
         {/* price gridlines */}
         {m.priceTicks.map((t) => (

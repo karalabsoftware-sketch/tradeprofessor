@@ -292,6 +292,34 @@ exclude the current candle, entries fill at the signal candle's close with
 exits checked from the next candle, and trailing stops move only after the
 candle they derive from has closed. Tests cover each of these.
 
+## Shared-capital backtest
+
+```bash
+npm run portfolio
+```
+
+Every other backtest here gives each instrument its own $10,000, which makes
+capital free and infinite and hides the cost the live bot actually pays: a
+position ties up part of ONE account, and while it is open every other
+instrument's signals go untaken. This simulator walks a single merged timeline
+ordered by bar close — the same order the live engine uses — and enforces the
+shared balance.
+
+It changed two decisions that the isolated backtests got wrong:
+
+| Config (holdout) | Trades | Missed | Win% | PF | Net | Avg bars held |
+|---|---|---|---|---|---|---|
+| 1:4 (v1.2.0) | 46 | 147 | 23.9 | 1.01 | +$50 | 138.6 |
+| 1:3 + partial | 69 | 74 | 24.6 | 0.88 | −$733 | 103.6 |
+| 1:2 + partial | 92 | 60 | 31.5 | 1.01 | +$48 | 80.0 |
+| **1:4 + partial + 60-bar stop** | **131** | 99 | **43.5** | **1.08** | **+$650** | **43.1** |
+
+**Moving the target closer does not work**, even with capital competition
+modelled — the freed capital does not pay for the worse per-trade expectancy.
+**A time stop does.** The problem was never the target distance; it was trades
+that go nowhere holding the account hostage. Tightening the limit further
+backfires (42 bars: −$364, 30 bars: −$1,879) — winners need room.
+
 ## Per-instrument study
 
 ```bash
@@ -370,8 +398,16 @@ allowed direction vary by venue (see the table at the top).
 - Size: `qty = (equity × 0.015) / (3.5 × ATR14)` — 1.5% of the **shared**
   account risked per trade, so a volatile instrument automatically takes a
   smaller position than a calm one.
-- Capital: one shared $10,000. A signal is taken only if its notional fits the
-  free balance; otherwise it is recorded in `missed_opportunities`.
+- Time stop: a position is closed after **60 of its own bars** regardless of
+  price — ~10 days on crypto 4h, ~3 months on daily equities, so in practice it
+  binds crypto, which is where the problem was.
+- Capital: one shared $10,000. A signal that does not fit the free balance is
+  taken **smaller** (risk scales down with it, so a half-size trade risks
+  0.75%) rather than skipped; below 25% of the intended size it is recorded in
+  `missed_opportunities` instead.
+- Missed setups are **replayed** each cycle with their recorded
+  entry/stop/target and the same exit rules, so the dashboard reports what the
+  budget cost — or saved — in dollars rather than as a count.
 - Risk engine halts new entries on: daily realized loss ≥4%, 6 consecutive
   losses, or ≥10% drawdown from peak equity. **Note:** these thresholds were
   designed for a single instrument. With eleven trading at once, six

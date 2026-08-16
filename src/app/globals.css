@@ -369,6 +369,34 @@ tr:last-child td { border-bottom: none; }
   line-height: 1.5;
 }
 
+/* ---- missed-opportunity summary ---- */
+
+.missed-summary {
+  display: grid;
+  grid-template-columns: repeat(2, 1fr);
+  gap: 12px;
+  margin-bottom: 14px;
+}
+
+@media (max-width: 620px) {
+  .missed-summary { grid-template-columns: 1fr; }
+}
+
+.missed-stat {
+  background: var(--surface-2);
+  border: 1px solid var(--border);
+  border-radius: 10px;
+  padding: 12px 14px;
+}
+
+.missed-total {
+  font-size: 24px;
+  font-weight: 700;
+  font-variant-numeric: tabular-nums;
+  margin-top: 3px;
+  line-height: 1.15;
+}
+
 /* ---- venue + instrument navigation ---- */
 
 .venue-nav {

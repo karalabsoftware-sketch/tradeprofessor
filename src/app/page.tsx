@@ -71,6 +71,10 @@ export default async function Dashboard({
   const totalReturn = ((equity - CONFIG.account.startingEquity) / CONFIG.account.startingEquity) * 100;
 
   const metrics = computeMetrics(trades, snapshots.map((s) => s.equity));
+  const missedResolved = missed.filter((m) => m.hypothetical_pnl !== null);
+  // Positive = the skipped trades would have profited, so the budget cost us.
+  const missedNet = missedResolved.reduce((s, m) => s + (m.hypothetical_pnl as number), 0);
+  const missedWins = missedResolved.filter((m) => (m.hypothetical_pnl as number) >= 0).length;
   const state = states.get(selected);
   const instTrades = trades.filter((t) => t.instrument_id === selected);
   const instOpen = openPositions.filter((p) => p.instrument_id === selected);
@@ -230,6 +234,7 @@ export default async function Dashboard({
                 points={priceSeries.slice(-CHART_CANDLES)}
                 markers={markers}
                 latestDecisionT={latest?.candle_time ?? null}
+                title={`${inst.id} ${intervalOf(inst)}`}
               />
             </section>
           </>
@@ -271,35 +276,76 @@ export default async function Dashboard({
 
         {/* ---------- missed opportunities ---------- */}
         <section className="card span-12">
-          <h2>Missed opportunities — valid signals the budget could not fund</h2>
+          <h2>Missed opportunities — what the budget actually cost</h2>
           {missed.length === 0 ? (
             <p className="muted" style={{ fontSize: 13 }}>
               None yet. Every valid signal so far has been affordable.
             </p>
           ) : (
-            <div className="table-scroll">
-              <table>
-                <thead>
-                  <tr>
-                    <th>When</th><th>Instrument</th><th>Side</th><th>Entry</th>
-                    <th>Needed</th><th>Available</th><th>Shortfall</th>
-                  </tr>
-                </thead>
-                <tbody>
-                  {missed.map((m) => (
-                    <tr key={m.id}>
-                      <td className="num">{fmtDateTime(m.created_at)}</td>
-                      <td>{m.instrument_id}</td>
-                      <td><SideBadge side={m.side} /></td>
-                      <td className="num">{px(m.entry_price, m.instrument_id)}</td>
-                      <td className="num">{usd(m.wanted_notional)}</td>
-                      <td className="num">{usd(m.available_capital)}</td>
-                      <td className="num neg">{usd(m.wanted_notional - m.available_capital)}</td>
+            <>
+              <div className="missed-summary">
+                <div className="missed-stat">
+                  <div className="account-label">Net effect of skipping</div>
+                  <div className={`missed-total ${missedNet >= 0 ? "neg" : "pos"}`}>
+                    {missedNet >= 0 ? `−${usd(missedNet)}` : `+${usd(-missedNet)}`}
+                  </div>
+                  <div className="account-sub">
+                    {missedNet >= 0
+                      ? "these trades would have made money — the budget cost us this"
+                      : "these trades would have lost money — the budget saved us this"}
+                  </div>
+                </div>
+                <div className="missed-stat">
+                  <div className="account-label">Resolved</div>
+                  <div className="missed-total">{missedResolved.length} / {missed.length}</div>
+                  <div className="account-sub">
+                    {missedWins} would have won · {missedResolved.length - missedWins} would have lost
+                    {missed.length - missedResolved.length > 0 &&
+                      ` · ${missed.length - missedResolved.length} still running`}
+                  </div>
+                </div>
+              </div>
+              <div className="table-scroll">
+                <table>
+                  <thead>
+                    <tr>
+                      <th>When</th><th>Instrument</th><th>Side</th><th>Entry</th>
+                      <th>Needed</th><th>Available</th><th>Shortfall</th>
+                      <th>Would have</th><th>P/L</th>
                     </tr>
-                  ))}
-                </tbody>
-              </table>
-            </div>
+                  </thead>
+                  <tbody>
+                    {missed.map((m) => (
+                      <tr key={m.id}>
+                        <td className="num">{fmtDateTime(m.created_at)}</td>
+                        <td>{m.instrument_id}</td>
+                        <td><SideBadge side={m.side} /></td>
+                        <td className="num">{px(m.entry_price, m.instrument_id)}</td>
+                        <td className="num">{usd(m.wanted_notional)}</td>
+                        <td className="num">{usd(m.available_capital)}</td>
+                        <td className="num muted">{usd(m.wanted_notional - m.available_capital)}</td>
+                        <td>
+                          {m.hypothetical_exit === null ? (
+                            <span className="muted">still running</span>
+                          ) : (
+                            <span>hit {m.hypothetical_exit}</span>
+                          )}
+                        </td>
+                        <td className={`num ${m.hypothetical_pnl === null ? "muted" : m.hypothetical_pnl >= 0 ? "pos" : "neg"}`}>
+                          {m.hypothetical_pnl === null ? "—" : signUsd(m.hypothetical_pnl)}
+                        </td>
+                      </tr>
+                    ))}
+                  </tbody>
+                </table>
+              </div>
+              <p className="capital-note">
+                Each skipped setup is replayed with the entry, stop and target recorded at the
+                time and the same exit rules a real position gets, including the {CONFIG.exits.maxBarsHeld}-bar
+                time stop. &quot;We missed N signals&quot; has no sign on its own — half of them may
+                have been losers, in which case the fixed budget protected the account.
+              </p>
+            </>
           )}
         </section>
 
@@ -531,6 +577,9 @@ async function load(selectedId: string) {
       entry_price: Number(r.entry_price),
       wanted_notional: Number(r.wanted_notional),
       available_capital: Number(r.available_capital),
+      hypothetical_pnl:
+        r.hypothetical_pnl === null || r.hypothetical_pnl === undefined ? null : Number(r.hypothetical_pnl),
+      hypothetical_exit: (r.hypothetical_exit ?? null) as string | null,
     })),
   };
 }

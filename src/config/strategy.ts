@@ -24,8 +24,18 @@
  *         in both halves for BTC, ETH, SOL and HBAR. Mechanism: a 2.5xATR
  *         stop sits inside normal noise and is taken out before the move
  *         develops. Also introduces VENUE_RULES — see below.
+ * v1.3.0  Two capital-efficiency changes, both measured with the new
+ *         shared-capital simulator (`npm run portfolio`) rather than the
+ *         isolated-capital backtests, which cannot see capital competition:
+ *           - partial sizing: a signal that does not fit the free balance is
+ *             taken smaller instead of skipped
+ *           - 60-bar time stop: a position that has gone nowhere stops
+ *             holding every other instrument's signals hostage
+ *         Notably, moving the TARGET closer was tested and rejected (1:3 ->
+ *         -$733, 1:1.5 -> -$1,911 on holdout). The problem was never the
+ *         target distance; it was trades sitting idle. Target stays at 1:4.
  */
-export const STRATEGY_VERSION = "multi-trend-v1.2.0";
+export const STRATEGY_VERSION = "multi-trend-v1.3.0";
 
 export type VenueKey = "crypto" | "us-equity";
 
@@ -140,12 +150,44 @@ export const CONFIG = {
     stopAtrMult: 3.5,
     /** Target distance = rrMultiple * stop distance (1:4 RR). */
     rrMultiple: 4,
+    /**
+     * Close a position after this many of its OWN bars, at the close, no
+     * matter where price is. Added in v1.3.0 and aimed at capital, not price.
+     *
+     * With one shared account a position that goes nowhere holds every other
+     * instrument's signals hostage. Measured with the shared-capital
+     * simulator (`npm run portfolio`), a 60-bar limit cut average holding
+     * from 139 bars to 43 and raised holdout net from +$50 to +$650, with
+     * trades rising 46 -> 131 and win rate 24% -> 43.5%.
+     *
+     * Note the venue asymmetry: 60 bars is ~10 days on crypto 4h but ~3
+     * months on daily equities, so in practice this binds crypto and rarely
+     * touches stocks. That matches where the problem actually was.
+     *
+     * Tightening it further backfired (42 bars: -$364, 30 bars: -$1,879) —
+     * winners need room. 60 is a measured optimum, not a round number, and
+     * the drop-off on either side is sharp enough to re-check periodically.
+     */
+    maxBarsHeld: 60,
   },
 
   sizing: {
     /** qty = (equity * riskPerTrade) / (stopAtrMult * ATR14) — 1.5% risk. */
     riskPerTrade: 0.015,
     maxOpenPositions: 1,
+    /**
+     * When the full-size position will not fit the free balance, take a
+     * smaller one instead of skipping the signal. Risk scales down with it,
+     * so a half-size trade risks 0.75% rather than 1.5% — strictly safer per
+     * trade, and it roughly halves missed opportunities (holdout 147 -> 94).
+     */
+    allowPartial: true,
+    /**
+     * Below this share of the intended size the trade is not worth a slot;
+     * record it as missed instead. Prevents token positions that add
+     * bookkeeping without moving the account.
+     */
+    minPartialFraction: 0.25,
   },
 
   fills: {

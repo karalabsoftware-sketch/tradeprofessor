@@ -46,6 +46,10 @@ ALTER TABLE instrument_state ADD COLUMN IF NOT EXISTS interval text;
 ALTER TABLE trades  ADD COLUMN IF NOT EXISTS instrument_id text;
 ALTER TABLE signals ADD COLUMN IF NOT EXISTS instrument_id text;
 ALTER TABLE trades  ADD COLUMN IF NOT EXISTS notional double precision;
+-- 1 = full size. Below that, the free balance forced a smaller position and
+-- the trade risked proportionally less than the configured 1.5%.
+ALTER TABLE trades  ADD COLUMN IF NOT EXISTS sized_fraction double precision;
+ALTER TABLE trades  ADD COLUMN IF NOT EXISTS intended_qty double precision;
 
 -- Backfill the single-instrument era so old rows stay queryable.
 UPDATE trades  SET instrument_id = symbol WHERE instrument_id IS NULL;

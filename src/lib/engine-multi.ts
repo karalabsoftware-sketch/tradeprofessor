@@ -35,6 +35,17 @@ import { checkPriceExit, forcedExitPrice, openPnl, planEntry, settleClose, Side 
 
 type Sql = ReturnType<typeof db>;
 
+type Json = Record<string, unknown>;
+
+/** Shape of the single json_build_object the engine reads at the start. */
+interface EnginePayload {
+  account: Json | null;
+  states: Json[];
+  positions: Json[];
+  unresolved: Json[];
+  last_close: Record<string, number>;
+}
+
 interface AccountState {
   realized_equity: number;
   peak_equity: number;
@@ -55,6 +66,7 @@ interface OpenPosition {
   target_price: number;
   entry_fee: number;
   notional: number;
+  entry_candle: number;
 }
 
 interface Loaded {
@@ -124,12 +136,41 @@ export async function runEvaluation(): Promise<EvaluationResult> {
   const instruments = enabledInstruments();
 
   // ---- reads: three queries, in parallel -------------------------------
-  const [accountRows, stateRows, positionRows] = await Promise.all([
-    sql`SELECT * FROM account_state WHERE id = 1`,
-    sql`SELECT instrument_id, last_candle_time FROM instrument_state`,
-    sql`SELECT id, instrument_id, side, entry_price, qty, stop_price, target_price, entry_fee, notional
-        FROM trades WHERE status = 'open' ORDER BY id`,
-  ]);
+  // ONE query, not five in parallel. Supabase's transaction pooler cannot
+  // safely interleave several in-flight statements on one pooled connection:
+  // fanning reads out with Promise.all left sessions stuck in ClientRead
+  // forever, and the next cycle then blocked behind them. One statement, one
+  // connection, no pipelining.
+  const [{ payload }] = await sql<{ payload: EnginePayload }[]>`
+    SELECT json_build_object(
+      'account', (SELECT row_to_json(a) FROM account_state a WHERE a.id = 1),
+      'states', (SELECT coalesce(json_agg(s), '[]'::json)
+                 FROM (SELECT instrument_id, last_candle_time FROM instrument_state) s),
+      'positions', (SELECT coalesce(json_agg(p ORDER BY p.id), '[]'::json) FROM (
+          SELECT id, instrument_id, side, entry_price, qty, stop_price, target_price,
+                 entry_fee, notional, entry_candle
+          FROM trades WHERE status = 'open') p),
+      -- Missed setups whose outcome is not yet known; resolved below against
+      -- the candles this cycle already fetched, so it costs no extra I/O.
+      'unresolved', (SELECT coalesce(json_agg(m), '[]'::json) FROM (
+          SELECT id, instrument_id, candle_time, side, entry_price, stop_price, target_price, qty
+          FROM missed_opportunities WHERE hypothetical_pnl IS NULL) m),
+      -- Last stored close per instrument. Without it, a cycle where nothing is
+      -- fresh marks open positions flat and stamps a false dip on the curve.
+      'last_close', (SELECT coalesce(json_object_agg(l.symbol, l.close), '{}'::json) FROM (
+          SELECT DISTINCT ON (symbol) symbol, close FROM candles
+          ORDER BY symbol, open_time DESC) l)
+    ) AS payload
+  `;
+
+  const accountRows = payload.account ? [payload.account] : [];
+  const stateRows = payload.states;
+  const positionRows = payload.positions;
+  const unresolvedMissed = payload.unresolved;
+  const lastCloseRows = Object.entries(payload.last_close).map(([symbol, close]) => ({
+    symbol,
+    close: Number(close),
+  }));
 
   if (accountRows.length === 0) {
     throw new Error("account_state not initialized — run `npm run seed` first");
@@ -149,7 +190,10 @@ export async function runEvaluation(): Promise<EvaluationResult> {
   const signals: SignalRow[] = [];
   const states: StateRow[] = [];
   const newCandles: CandleRow[] = [];
+  /** Instruments with a NEW bar — these get evaluated for entries/exits. */
   const loaded: Loaded[] = [];
+  /** Every instrument with usable history, new bar or not. */
+  const prepared: Loaded[] = [];
   let anyError = false;
 
   for (let k = 0; k < instruments.length; k++) {
@@ -174,6 +218,11 @@ export async function runEvaluation(): Promise<EvaluationResult> {
       results.push({ instrument: inst.id, status: "warming-up" });
       continue;
     }
+
+    // Keep every instrument we have bars for, whether or not they are new.
+    // Resolving past missed setups needs price history, not fresh price —
+    // scoping it to instruments with a new bar meant it almost never ran.
+    prepared.push(data);
 
     if (data.freshCandles.length === 0) {
       states.push({ instrument_id: inst.id, last_candle_time: prev, warming_up: false, candles_seen: data.candles.length, last_error: null });
@@ -209,7 +258,12 @@ export async function runEvaluation(): Promise<EvaluationResult> {
     account.day_start_date = today;
     account.day_start_equity = account.realized_equity;
   }
-  applyRiskEngine(account, positions, loaded);
+  applyRiskEngine(
+    account,
+    positions,
+    loaded,
+    new Map(lastCloseRows.map((r) => [String(r.symbol), Number(r.close)]))
+  );
 
   // ---- entries, earliest bar close first --------------------------------
   const openedTrades: Record<string, unknown>[] = [];
@@ -260,34 +314,55 @@ export async function runEvaluation(): Promise<EvaluationResult> {
       );
       const notional = plan.entryPrice * plan.qty;
 
+      // If the full size will not fit, take a smaller position rather than
+      // skipping the signal. Risk scales down with it — a half-size trade
+      // risks 0.75% instead of 1.5% — so this is strictly safer per trade
+      // and roughly halves missed opportunities. Below minPartialFraction
+      // the slice is not worth a slot and is recorded as missed instead.
+      let fraction = 1;
       if (notional > available) {
-        // The setup was valid; the budget was not. This is the measurement
-        // the fixed-capital design exists to produce.
-        missedRows.push({
-          instrument_id: inst.id, candle_time: data.last.openTime, side: decision.enter,
-          reason: "insufficient_capital", wanted_notional: notional, available_capital: available,
-          entry_price: plan.entryPrice, stop_price: plan.stopPrice, target_price: plan.targetPrice,
-          qty: plan.qty, strategy_version: STRATEGY_VERSION,
-        });
-        action = "missed";
-        missed = `needed ${notional.toFixed(2)}, had ${available.toFixed(2)}`;
-        reason = `valid ${decision.enter} setup skipped — capital fully deployed (${missed})`;
-      } else {
-        account.realized_equity -= plan.entryFee;
+        fraction = available > 0 ? available / notional : 0;
+        if (!CONFIG.sizing.allowPartial || fraction < CONFIG.sizing.minPartialFraction) {
+          missedRows.push({
+            instrument_id: inst.id, candle_time: data.last.openTime, side: decision.enter,
+            reason: "insufficient_capital", wanted_notional: notional, available_capital: available,
+            entry_price: plan.entryPrice, stop_price: plan.stopPrice, target_price: plan.targetPrice,
+            qty: plan.qty, strategy_version: STRATEGY_VERSION,
+          });
+          action = "missed";
+          missed = `needed ${notional.toFixed(2)}, had ${available.toFixed(2)}`;
+          reason = `valid ${decision.enter} setup skipped — free capital covers only ${(fraction * 100).toFixed(0)}% of the position, below the ${(CONFIG.sizing.minPartialFraction * 100).toFixed(0)}% floor (${missed})`;
+          fraction = 0;
+        }
+      }
+
+      if (fraction > 0) {
+        const qty = plan.qty * fraction;
+        const actualNotional = plan.entryPrice * qty;
+        const entryFee = qty * plan.entryPrice * CONFIG.fills.feePct;
+        account.realized_equity -= entryFee;
+
         openedTrades.push({
           symbol: inst.id, instrument_id: inst.id, side: decision.enter, status: "open",
           strategy_version: STRATEGY_VERSION,
           entry_time: new Date(data.last.closeTime).toISOString(),
-          entry_candle: data.last.openTime, entry_price: plan.entryPrice, qty: plan.qty,
+          entry_candle: data.last.openTime, entry_price: plan.entryPrice, qty,
           stop_price: plan.stopPrice, target_price: plan.targetPrice,
-          atr_at_entry: data.atr14[i], entry_fee: plan.entryFee, notional,
+          atr_at_entry: data.atr14[i], entry_fee: entryFee, notional: actualNotional,
+          sized_fraction: fraction, intended_qty: plan.qty,
         });
         positions.push({
           id: -1 - openedTrades.length, // placeholder; real id assigned on insert
           instrument_id: inst.id, side: decision.enter, entry_price: plan.entryPrice,
-          qty: plan.qty, stop_price: plan.stopPrice, target_price: plan.targetPrice,
-          entry_fee: plan.entryFee, notional,
+          qty, stop_price: plan.stopPrice, target_price: plan.targetPrice,
+          entry_fee: entryFee, notional: actualNotional, entry_candle: data.last.openTime,
         });
+
+        if (fraction < 0.999) {
+          action = `entry_${decision.enter}_partial`;
+          missed = `sized to ${(fraction * 100).toFixed(0)}% — free capital ${available.toFixed(2)} of ${notional.toFixed(2)} needed`;
+          reason = `${decision.reason} — opened at ${(fraction * 100).toFixed(0)}% size to fit free capital (risk ${(CONFIG.sizing.riskPerTrade * fraction * 100).toFixed(2)}% instead of ${(CONFIG.sizing.riskPerTrade * 100).toFixed(1)}%)`;
+        }
       }
     }
 
@@ -319,8 +394,16 @@ export async function runEvaluation(): Promise<EvaluationResult> {
     });
   }
 
+  // ---- resolve missed setups whose outcome is now knowable --------------
+  const resolved = resolveMissed(unresolvedMissed, prepared);
+
   // ---- account totals ---------------------------------------------------
-  const marks = new Map(loaded.map((d) => [d.inst.id, d.last.close]));
+  // Prefer this cycle's fresh close, fall back to the last stored one so a
+  // quiet cycle does not report open positions as flat.
+  const marks = new Map<string, number>(
+    lastCloseRows.map((r) => [String(r.symbol), Number(r.close)])
+  );
+  for (const d of loaded) marks.set(d.inst.id, d.last.close);
   const unrealized = positions.reduce(
     (s, p) => s + (marks.has(p.instrument_id) ? openPnl(toPosLike(p), marks.get(p.instrument_id) as number) : 0),
     0
@@ -332,7 +415,7 @@ export async function runEvaluation(): Promise<EvaluationResult> {
   // ---- writes: one statement per table ----------------------------------
   await flush(sql, {
     account, equity, deployed, unrealized, positions: positions.length,
-    signals, states, newCandles, closedTrades, openedTrades, missedRows,
+    signals, states, newCandles, closedTrades, openedTrades, missedRows, resolved,
   });
 
   return {
@@ -379,10 +462,23 @@ function runExits(
   const byTime = new Map(data.candles.map((c, i) => [c.openTime, i]));
   let live: OpenPosition | null = pos;
 
+  const entryIdx = byTime.get(pos.entry_candle);
+
   for (const c of data.freshCandles) {
     if (!live) break;
     let fill = checkPriceExit(toPosLike(live), c);
     let reason: string = fill?.reason ?? "";
+
+    // Time stop: about capital, not price. A trade that has gone nowhere is
+    // holding every other instrument's signals hostage, so it is closed at
+    // the market like any forced exit rather than pretending a level filled.
+    if (!fill && entryIdx !== undefined) {
+      const idx = byTime.get(c.openTime);
+      if (idx !== undefined && idx - entryIdx >= CONFIG.exits.maxBarsHeld) {
+        fill = { price: forcedExitPrice(live.side, c.close), reason: "stop" };
+        reason = "time-stop";
+      }
+    }
 
     if (!fill) {
       const idx = byTime.get(c.openTime);
@@ -424,10 +520,86 @@ function runExits(
   return logs;
 }
 
-function applyRiskEngine(account: AccountState, positions: OpenPosition[], loaded: Loaded[]): void {
+export interface ResolvedMiss {
+  id: number;
+  pnl: number;
+  exit: string;
+}
+
+/**
+ * Work out what each skipped setup WOULD have done, using the entry, stop and
+ * target that were recorded at the time and the same exit rules a real
+ * position gets — including the time stop.
+ *
+ * Without this, "we missed 11 signals" is a number with no sign: half of them
+ * might have been losers, in which case the budget protected us. Resolving
+ * them turns the capital constraint from an anecdote into a dollar figure.
+ *
+ * Only setups whose outcome is settled get written; ones still running stay
+ * NULL and are retried next cycle.
+ */
+function resolveMissed(rows: readonly Record<string, unknown>[], loaded: Loaded[]): ResolvedMiss[] {
+  const byInstrument = new Map(loaded.map((d) => [d.inst.id, d]));
+  const out: ResolvedMiss[] = [];
+
+  for (const r of rows) {
+    const data = byInstrument.get(String(r.instrument_id));
+    if (!data) continue; // no fresh data for it this cycle
+
+    const startTime = Number(r.candle_time);
+    const startIdx = data.candles.findIndex((c) => c.openTime === startTime);
+    if (startIdx < 0) continue; // outside the window we hold
+
+    const pos = {
+      side: r.side as Side,
+      entryPrice: Number(r.entry_price),
+      qty: Number(r.qty),
+      stopPrice: Number(r.stop_price),
+      targetPrice: Number(r.target_price),
+    };
+    const entryFee = pos.qty * pos.entryPrice * CONFIG.fills.feePct;
+
+    for (let i = startIdx + 1; i < data.candles.length; i++) {
+      const c = data.candles[i];
+      let fill = checkPriceExit(pos, c);
+      let why: string = fill?.reason ?? "";
+
+      if (!fill && i - startIdx >= CONFIG.exits.maxBarsHeld) {
+        fill = { price: forcedExitPrice(pos.side, c.close), reason: "stop" };
+        why = "time-stop";
+      }
+      if (!fill) {
+        const e50 = data.ema50[i];
+        const e200 = data.ema200[i];
+        if (e50 !== null && e200 !== null) {
+          const bull = e50 > e200;
+          if ((pos.side === "long" && !bull) || (pos.side === "short" && bull)) {
+            fill = { price: forcedExitPrice(pos.side, c.close), reason: "stop" };
+            why = "regime-flip";
+          }
+        }
+      }
+
+      if (fill) {
+        const s = settleClose(pos, fill.price, entryFee);
+        out.push({ id: Number(r.id), pnl: s.netPnl, exit: why || fill.reason });
+        break;
+      }
+    }
+  }
+  return out;
+}
+
+function applyRiskEngine(
+  account: AccountState,
+  positions: OpenPosition[],
+  loaded: Loaded[],
+  storedMarks: Map<string, number>
+): void {
   if (account.halted) return;
 
-  const marks = new Map(loaded.map((d) => [d.inst.id, d.last.close]));
+  const marks = new Map(storedMarks);
+  for (const d of loaded) marks.set(d.inst.id, d.last.close);
   const unrealized = positions.reduce(
     (s, p) => s + (marks.has(p.instrument_id) ? openPnl(toPosLike(p), marks.get(p.instrument_id) as number) : 0),
     0
@@ -483,6 +655,7 @@ function rowToPosition(r: Record<string, unknown>): OpenPosition {
     target_price: Number(r.target_price),
     entry_fee: Number(r.entry_fee),
     notional: Number(r.notional ?? Number(r.entry_price) * Number(r.qty)),
+    entry_candle: Number(r.entry_candle ?? 0),
   };
 }
 
@@ -504,91 +677,108 @@ interface FlushArgs {
   closedTrades: { id: number; candle: Candle; price: number; reason: string; fee: number; pnl: number; pnlPct: number }[];
   openedTrades: Record<string, unknown>[];
   missedRows: Record<string, unknown>[];
+  resolved: ResolvedMiss[];
 }
 
+/**
+ * All writes, in ONE transaction, executed sequentially.
+ *
+ * They used to go out via Promise.all. Against Supabase's transaction pooler
+ * that pipelines several statements onto one pooled connection, which
+ * pgbouncer cannot demultiplex: sessions were left stuck in ClientRead
+ * indefinitely and the next cycle blocked behind them. A transaction also
+ * makes the flush atomic, which it should have been anyway — a cycle that
+ * records a fill but not the account update leaves the books wrong.
+ */
 async function flush(sql: Sql, a: FlushArgs): Promise<void> {
-  // Closing trades must land before the snapshot; they are rare, so a few
-  // individual updates are fine.
-  for (const t of a.closedTrades) {
-    await sql`
-      UPDATE trades SET
-        status = 'closed',
-        exit_time = ${new Date(t.candle.closeTime).toISOString()},
-        exit_candle = ${t.candle.openTime},
-        exit_price = ${t.price},
-        exit_reason = ${t.reason},
-        exit_fee = ${t.fee},
-        pnl = ${t.pnl},
-        pnl_pct = ${t.pnlPct}
-      WHERE id = ${t.id}
+  await sql.begin(async (tx) => {
+    for (const t of a.closedTrades) {
+      await tx`
+        UPDATE trades SET
+          status = 'closed',
+          exit_time = ${new Date(t.candle.closeTime).toISOString()},
+          exit_candle = ${t.candle.openTime},
+          exit_price = ${t.price},
+          exit_reason = ${t.reason},
+          exit_fee = ${t.fee},
+          pnl = ${t.pnl},
+          pnl_pct = ${t.pnlPct}
+        WHERE id = ${t.id}
+      `;
+    }
+
+    if (a.newCandles.length > 0) {
+      await tx`INSERT INTO candles ${tx(a.newCandles)} ON CONFLICT (symbol, open_time) DO NOTHING`;
+    }
+    if (a.openedTrades.length > 0) {
+      await tx`INSERT INTO trades ${tx(a.openedTrades)}`;
+    }
+    if (a.missedRows.length > 0) {
+      await tx`INSERT INTO missed_opportunities ${tx(a.missedRows)}`;
+    }
+    if (a.resolved.length > 0) {
+      await tx`
+        UPDATE missed_opportunities m
+        SET hypothetical_pnl = x.pnl, hypothetical_exit = x.exit
+        FROM jsonb_to_recordset(${tx.json(a.resolved as never)}::jsonb)
+          AS x(id bigint, pnl double precision, "exit" text)
+        WHERE m.id = x.id
+      `;
+    }
+    if (a.states.length > 0) {
+      const now = new Date().toISOString();
+      const rows = a.states.map((s) => ({ ...s, last_eval_at: now, updated_at: now }));
+      await tx`
+        INSERT INTO instrument_state ${tx(rows)}
+        ON CONFLICT (instrument_id) DO UPDATE SET
+          last_candle_time = EXCLUDED.last_candle_time,
+          last_eval_at = EXCLUDED.last_eval_at,
+          warming_up = EXCLUDED.warming_up,
+          candles_seen = EXCLUDED.candles_seen,
+          last_error = EXCLUDED.last_error,
+          updated_at = now()
+      `;
+    }
+    if (a.signals.length > 0) {
+      // jsonb in a multi-row insert needs an explicit shape, hence recordset.
+      const payload = a.signals.map((s) => ({
+        symbol: s.instrument_id,
+        instrument_id: s.instrument_id,
+        candle_time: s.candle_time,
+        action: s.action,
+        reason: s.reason,
+        details: s.details ?? null,
+        strategy_version: STRATEGY_VERSION,
+      }));
+      await tx`
+        INSERT INTO signals (symbol, instrument_id, candle_time, action, reason, details, strategy_version)
+        SELECT x.symbol, x.instrument_id, x.candle_time, x.action, x.reason, x.details, x.strategy_version
+        FROM jsonb_to_recordset(${tx.json(payload as never)}::jsonb)
+          AS x(symbol text, instrument_id text, candle_time bigint, action text,
+               reason text, details jsonb, strategy_version text)
+      `;
+    }
+
+    await tx`
+      INSERT INTO equity_snapshots (candle_time, equity, realized, open_pnl, deployed, available, open_positions, strategy_version)
+      VALUES (${Date.now()}, ${a.equity}, ${a.account.realized_equity}, ${a.unrealized},
+              ${a.deployed}, ${a.account.realized_equity - a.deployed}, ${a.positions}, ${STRATEGY_VERSION})
     `;
-  }
 
-  const tasks: Promise<unknown>[] = [];
-
-  if (a.newCandles.length > 0) {
-    tasks.push(sql`INSERT INTO candles ${sql(a.newCandles)} ON CONFLICT (symbol, open_time) DO NOTHING`);
-  }
-  if (a.openedTrades.length > 0) {
-    tasks.push(sql`INSERT INTO trades ${sql(a.openedTrades)}`);
-  }
-  if (a.missedRows.length > 0) {
-    tasks.push(sql`INSERT INTO missed_opportunities ${sql(a.missedRows)}`);
-  }
-  if (a.states.length > 0) {
-    const rows = a.states.map((s) => ({ ...s, last_eval_at: new Date().toISOString(), updated_at: new Date().toISOString() }));
-    tasks.push(sql`
-      INSERT INTO instrument_state ${sql(rows)}
-      ON CONFLICT (instrument_id) DO UPDATE SET
-        last_candle_time = EXCLUDED.last_candle_time,
-        last_eval_at = EXCLUDED.last_eval_at,
-        warming_up = EXCLUDED.warming_up,
-        candles_seen = EXCLUDED.candles_seen,
-        last_error = EXCLUDED.last_error,
+    await tx`
+      UPDATE account_state SET
+        realized_equity = ${a.account.realized_equity},
+        peak_equity = ${a.account.peak_equity},
+        day_start_equity = ${a.account.day_start_equity},
+        day_start_date = ${a.account.day_start_date},
+        consecutive_losses = ${a.account.consecutive_losses},
+        halted = ${a.account.halted},
+        halt_reason = ${a.account.halt_reason},
+        last_eval_at = now(),
+        last_error = NULL,
+        strategy_version = ${STRATEGY_VERSION},
         updated_at = now()
-    `);
-  }
-  if (a.signals.length > 0) {
-    // jsonb in a multi-row insert needs an explicit shape, hence recordset.
-    const payload = a.signals.map((s) => ({
-      symbol: s.instrument_id,
-      instrument_id: s.instrument_id,
-      candle_time: s.candle_time,
-      action: s.action,
-      reason: s.reason,
-      details: s.details ?? null,
-      strategy_version: STRATEGY_VERSION,
-    }));
-    tasks.push(sql`
-      INSERT INTO signals (symbol, instrument_id, candle_time, action, reason, details, strategy_version)
-      SELECT x.symbol, x.instrument_id, x.candle_time, x.action, x.reason, x.details, x.strategy_version
-      FROM jsonb_to_recordset(${sql.json(payload as never)}::jsonb)
-        AS x(symbol text, instrument_id text, candle_time bigint, action text,
-             reason text, details jsonb, strategy_version text)
-    `);
-  }
-
-  tasks.push(sql`
-    INSERT INTO equity_snapshots (candle_time, equity, realized, open_pnl, deployed, available, open_positions, strategy_version)
-    VALUES (${Date.now()}, ${a.equity}, ${a.account.realized_equity}, ${a.unrealized},
-            ${a.deployed}, ${a.account.realized_equity - a.deployed}, ${a.positions}, ${STRATEGY_VERSION})
-  `);
-
-  tasks.push(sql`
-    UPDATE account_state SET
-      realized_equity = ${a.account.realized_equity},
-      peak_equity = ${a.account.peak_equity},
-      day_start_equity = ${a.account.day_start_equity},
-      day_start_date = ${a.account.day_start_date},
-      consecutive_losses = ${a.account.consecutive_losses},
-      halted = ${a.account.halted},
-      halt_reason = ${a.account.halt_reason},
-      last_eval_at = now(),
-      last_error = NULL,
-      strategy_version = ${STRATEGY_VERSION},
-      updated_at = now()
-    WHERE id = 1
-  `);
-
-  await Promise.all(tasks);
+      WHERE id = 1
+    `;
+  });
 }
