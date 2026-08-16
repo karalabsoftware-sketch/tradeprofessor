@@ -398,9 +398,14 @@ allowed direction vary by venue (see the table at the top).
 - Size: `qty = (equity × 0.015) / (3.5 × ATR14)` — 1.5% of the **shared**
   account risked per trade, so a volatile instrument automatically takes a
   smaller position than a calm one.
-- Time stop: a position is closed after **60 of its own bars** regardless of
-  price — ~10 days on crypto 4h, ~3 months on daily equities, so in practice it
-  binds crypto, which is where the problem was.
+- Time stop: a position is closed after **60 of its own bars**, but **only if
+  it is at or above break-even**. ~10 days on crypto 4h, ~3 months on daily
+  equities, so in practice it binds crypto, which is where the problem was.
+  A losing trade is left to its stop: that exit is already planned and sized
+  so the loss costs exactly 1.5%, and closing early on a timer would convert a
+  budgeted risk into an unplanned partial loss. The worry that losers would
+  accumulate did not survive measurement — holding averaged 44 bars vs 43 and
+  deployment 77% vs 78%, because a losing trade reaches its stop anyway.
 - Capital: one shared $10,000. A signal that does not fit the free balance is
   taken **smaller** (risk scales down with it, so a half-size trade risks
   0.75%) rather than skipped; below 25% of the intended size it is recorded in

@@ -410,6 +410,8 @@ export default async function Dashboard({
             <li>Entry LONG: close crosses <em>above</em> EMA21 AND <code>RSI14 &gt; 52</code> AND bull regime. SHORT mirrors it with <code>RSI14 &lt; 48</code>.</li>
             <li>Dead band: no trades while <code>48 ≤ RSI ≤ 52</code>.</li>
             <li>Stop: entry ∓ <code>3.5 × ATR14</code>. Target: 4× the stop distance. One position per instrument. A tighter 2.5× stop sat inside normal noise and was taken out before moves developed.</li>
+            <li>Time stop: a position is closed after <code>{CONFIG.exits.maxBarsHeld}</code> of its own bars — but <strong>only if it is at or above break-even</strong>. A losing trade already has a planned exit at its stop, sized so the loss costs exactly 1.5%; closing it early on a timer would turn a budgeted risk into an unplanned partial loss. On crypto 4h the limit is ~10 days.</li>
+            <li>Capital: if a signal does not fit the free balance the bot takes a <strong>smaller</strong> position (risk scales down with it) rather than skipping; below 25% of the intended size it is recorded as a missed opportunity instead.</li>
             <li>Size: <code>qty = (equity × 0.015) / (2.5 × ATR14)</code> — 1.5% of the shared account risked per trade, so a volatile instrument automatically gets a smaller position than a calm one.</li>
             <li>Capital: one shared {usd(CONFIG.account.startingEquity)}. A signal is only taken if its notional fits the free balance; otherwise it is logged as missed.</li>
             <li>Fills: entry at bar close + 0.05% slippage against the trade; if a bar touches both stop and target the stop is assumed first; a bar that <em>gaps</em> past the stop fills at the open, not the stop; 0.1% fee per fill.</li>

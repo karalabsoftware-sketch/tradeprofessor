@@ -472,11 +472,20 @@ function runExits(
     // Time stop: about capital, not price. A trade that has gone nowhere is
     // holding every other instrument's signals hostage, so it is closed at
     // the market like any forced exit rather than pretending a level filled.
+    //
+    // It does NOT fire on a losing position (unless configured to): that
+    // trade already has a planned exit at its stop, sized so the loss costs
+    // exactly riskPerTrade. Closing early on a timer would turn a budgeted
+    // risk into an unplanned partial loss.
     if (!fill && entryIdx !== undefined) {
       const idx = byTime.get(c.openTime);
       if (idx !== undefined && idx - entryIdx >= CONFIG.exits.maxBarsHeld) {
-        fill = { price: forcedExitPrice(live.side, c.close), reason: "stop" };
-        reason = "time-stop";
+        const exitPx = forcedExitPrice(live.side, c.close);
+        const settled = settleClose(toPosLike(live), exitPx, live.entry_fee);
+        if (CONFIG.exits.timeStopWhenLosing || settled.netPnl >= 0) {
+          fill = { price: exitPx, reason: "stop" };
+          reason = "time-stop";
+        }
       }
     }
 
@@ -565,8 +574,11 @@ function resolveMissed(rows: readonly Record<string, unknown>[], loaded: Loaded[
       let why: string = fill?.reason ?? "";
 
       if (!fill && i - startIdx >= CONFIG.exits.maxBarsHeld) {
-        fill = { price: forcedExitPrice(pos.side, c.close), reason: "stop" };
-        why = "time-stop";
+        const exitPx = forcedExitPrice(pos.side, c.close);
+        if (CONFIG.exits.timeStopWhenLosing || settleClose(pos, exitPx, entryFee).netPnl >= 0) {
+          fill = { price: exitPx, reason: "stop" };
+          why = "time-stop";
+        }
       }
       if (!fill) {
         const e50 = data.ema50[i];

@@ -34,8 +34,14 @@
  *         Notably, moving the TARGET closer was tested and rejected (1:3 ->
  *         -$733, 1:1.5 -> -$1,911 on holdout). The problem was never the
  *         target distance; it was trades sitting idle. Target stays at 1:4.
+ * v1.3.1  The time stop no longer fires on losing positions. The worry was
+ *         that losers would accumulate and clog the account; measured, they
+ *         do not (holding 44 vs 43 bars, deployment 77% vs 78%) because a
+ *         losing trade reaches its stop anyway. P&L between the two flips
+ *         sign with the bar limit, i.e. noise — so it is settled on
+ *         principle: a losing trade already has a planned exit at its stop.
  */
-export const STRATEGY_VERSION = "multi-trend-v1.3.0";
+export const STRATEGY_VERSION = "multi-trend-v1.3.1";
 
 export type VenueKey = "crypto" | "us-equity";
 
@@ -169,6 +175,27 @@ export const CONFIG = {
      * the drop-off on either side is sharp enough to re-check periodically.
      */
     maxBarsHeld: 60,
+    /**
+     * Whether the time stop fires on a losing position too.
+     *
+     * false — only close if the trade is at or above break-even; a losing one
+     *         keeps running until its stop or target.
+     *
+     * The time stop exists to free capital, and the first instinct was to
+     * apply it unconditionally. Measured, that instinct does not hold up:
+     * restricting it to profitable trades left average holding at 44 bars vs
+     * 43 and capital deployment at 77% vs 78% — losing positions do not
+     * accumulate, because they reach their stop anyway. The P&L difference
+     * flips sign depending on the bar limit (60 bars favours unconditional,
+     * 42 favours profit-only), which is the signature of noise rather than
+     * edge, so this is decided on principle instead:
+     *
+     * a losing position already HAS a planned exit — the stop, sized so the
+     * loss costs exactly `riskPerTrade`. Closing early on a timer converts a
+     * budgeted risk into an unplanned partial loss and gives up the recovery
+     * the stop was paying for.
+     */
+    timeStopWhenLosing: false,
   },
 
   sizing: {

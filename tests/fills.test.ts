@@ -217,6 +217,41 @@ describe("decideEntry — strategy gates", () => {
   });
 });
 
+describe("time stop", () => {
+  // The engine applies the limit; these pin the RULE it applies, so a future
+  // config change cannot quietly invert it.
+  const long = { side: "long" as const, entryPrice: 100, qty: 10, stopPrice: 90, targetPrice: 140 };
+  const entryFee = 10 * 100 * FEE;
+
+  it("a position in profit at the limit closes for a gain", () => {
+    const exitPx = forcedExitPrice("long", 110);
+    const r = settleClose(long, exitPx, entryFee);
+    expect(r.netPnl).toBeGreaterThan(0);
+  });
+
+  it("a position at a loss at the limit is left alone by default", () => {
+    // Config decides; the invariant is that "losing" is detected from NET
+    // P/L including both fees, not from the raw price move.
+    const exitPx = forcedExitPrice("long", 100.05); // barely above entry
+    const r = settleClose(long, exitPx, entryFee);
+    expect(r.netPnl).toBeLessThan(0); // fees make this a loss despite the price
+    expect(CONFIG.exits.timeStopWhenLosing).toBe(false);
+  });
+
+  it("break-even after fees counts as not losing", () => {
+    // Find the price where net P/L crosses zero and check the boundary holds.
+    let px = 100;
+    for (let i = 0; i < 2000 && settleClose(long, px, entryFee).netPnl < 0; i++) px += 0.01;
+    expect(settleClose(long, px, entryFee).netPnl).toBeGreaterThanOrEqual(0);
+    expect(settleClose(long, px - 0.02, entryFee).netPnl).toBeLessThan(0);
+  });
+
+  it("the limit is a real constraint, not effectively infinite", () => {
+    expect(CONFIG.exits.maxBarsHeld).toBeGreaterThan(0);
+    expect(CONFIG.exits.maxBarsHeld).toBeLessThan(CONFIG.minCandles);
+  });
+});
+
 describe("venue direction limits", () => {
   const bullLong = {
     close: 102, prevClose: 99, ema21: 100, prevEma21: 100,

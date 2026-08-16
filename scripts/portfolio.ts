@@ -88,32 +88,34 @@ async function main() {
     console.log(header);
     console.log("-".repeat(103));
 
-    const cases: { rr: number; partial: boolean; maxBars: number | null }[] = [
-      { rr: 4, partial: false, maxBars: null }, // mevcut canli yapi
-      { rr: 4, partial: true, maxBars: null },
-      { rr: 3, partial: true, maxBars: null },
-      { rr: 2, partial: true, maxBars: null },
-      { rr: 1.5, partial: true, maxBars: null },
-      // hedefi kisaltmak yerine SURESI dolani kapat
-      { rr: 4, partial: true, maxBars: 60 },
-      { rr: 4, partial: true, maxBars: 42 },
-      { rr: 4, partial: true, maxBars: 30 },
-      { rr: 4, partial: true, maxBars: 20 },
-      { rr: 3, partial: true, maxBars: 30 },
+    type Mode = "always" | "profitable-only";
+    const cases: { rr: number; partial: boolean; maxBars: number | null; mode: Mode }[] = [
+      { rr: 4, partial: false, maxBars: null, mode: "always" }, // v1.2.0
+      { rr: 4, partial: true, maxBars: null, mode: "always" },
+      { rr: 2, partial: true, maxBars: null, mode: "always" },
+      // zaman stopu: kosulsuz vs sadece kardaysa
+      { rr: 4, partial: true, maxBars: 60, mode: "always" }, // v1.3.0
+      { rr: 4, partial: true, maxBars: 60, mode: "profitable-only" },
+      { rr: 4, partial: true, maxBars: 42, mode: "always" },
+      { rr: 4, partial: true, maxBars: 42, mode: "profitable-only" },
+      { rr: 4, partial: true, maxBars: 90, mode: "always" },
+      { rr: 4, partial: true, maxBars: 90, mode: "profitable-only" },
+      { rr: 4, partial: true, maxBars: 30, mode: "profitable-only" },
     ];
 
     for (const c of cases) {
       {
-        const { rr, partial, maxBars } = c;
+        const { rr, partial, maxBars, mode } = c;
         const insts = base.map((b) => variantFor(b, rr));
         const r = simulatePortfolio(insts, lo, hi, {
           allowPartial: partial,
           minPartialFraction: 0.25,
           startingEquity: CONFIG.account.startingEquity,
           maxBarsHeld: maxBars,
+          timeStopMode: mode,
         });
         console.log(
-          pad(`1:${rr}${partial ? "+kismi" : ""}${maxBars ? ` +${maxBars}bar` : ""}`, 26) +
+          pad(`1:${rr}${partial ? "+ks" : ""}${maxBars ? ` +${maxBars}b${mode === "profitable-only" ? "(kar)" : ""}` : ""}`, 26) +
           padL(String(r.trades), 7) +
           padL(String(r.partialTrades), 7) +
           padL(String(r.missed), 7) +

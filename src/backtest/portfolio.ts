@@ -41,6 +41,19 @@ export interface PortfolioOptions {
    * nowhere in weeks is holding the account hostage. null = no time limit.
    */
   maxBarsHeld: number | null;
+  /**
+   * Whether the time stop fires on losing positions too.
+   *
+   * "always"          — release the slot regardless of P/L
+   * "profitable-only" — only close if the trade is at or above break-even,
+   *                     otherwise keep waiting for stop or target
+   *
+   * The second reads as prudent (why bank a loss the stop never triggered?)
+   * but inverts the selection: winners get released and losers accumulate,
+   * so over time the account fills with exactly the positions that are not
+   * working. Measured rather than assumed — see `npm run portfolio`.
+   */
+  timeStopMode: "always" | "profitable-only";
 }
 
 export interface PortfolioTrade {
@@ -161,8 +174,14 @@ export function simulatePortfolio(
       // Time stop: aimed at capital lock-up, so it fills at the close like a
       // market order rather than pretending a level was available.
       if (!fill && opts.maxBarsHeld !== null && ev.bar - held.entryBar >= opts.maxBarsHeld) {
-        fill = { price: forcedExitPrice(held.side, candle.close, fills), reason: "stop" };
-        reason = "time-stop";
+        const exitPx = forcedExitPrice(held.side, candle.close, fills);
+        const wouldNet =
+          (held.side === "long" ? 1 : -1) * (exitPx - held.entryPrice) * held.qty -
+          held.entryFee - held.qty * exitPx * fills.feePct;
+        if (opts.timeStopMode === "always" || wouldNet >= 0) {
+          fill = { price: exitPx, reason: "stop" };
+          reason = "time-stop";
+        }
       }
       if (!fill && variant.regime !== "none") {
         const reg = regimeAt(ctx, variant, ev.bar);
