@@ -154,7 +154,16 @@ export const CONFIG = {
      * but both venues currently use the same numbers.
      */
     stopAtrMult: 3.5,
-    /** Target distance = rrMultiple * stop distance (1:4 RR). */
+    /**
+     * Target distance = rrMultiple * stop distance (1:4 RR).
+     *
+     * Only ~5% of exits actually reach it — the time limit or the stop gets
+     * there first. That is not a defect: at this distance the target's job is
+     * to NOT cap winners, and pulling it closer to make it "work" costs
+     * money (holdout at 60 bars: 1:1.5 -> -$64, 1:2 -> +$77, 1:4 -> +$855).
+     * Pushing it further out (1:5, 1:6, 1:8) lands on the same plateau rather
+     * than improving consistently across both halves.
+     */
     rrMultiple: 4,
     /**
      * Close a position after this many of its OWN bars, at the close, no
@@ -170,9 +179,22 @@ export const CONFIG = {
      * months on daily equities, so in practice this binds crypto and rarely
      * touches stocks. That matches where the problem actually was.
      *
-     * Tightening it further backfired (42 bars: -$364, 30 bars: -$1,879) —
-     * winners need room. 60 is a measured optimum, not a round number, and
-     * the drop-off on either side is sharp enough to re-check periodically.
+     * Re-measured 2026-09-12 on a fuller window as a target x time-limit
+     * grid (37 cells, `npm run portfolio`). Two things held and one did not:
+     *
+     *  - 30 bars is a genuine cliff: every target tested lost money there
+     *    (holdout ~-$1,850 across 1:1.5 to 1:4). Do not shorten this.
+     *  - Everything from 45 bars to no limit at all is a wide, flat plateau
+     *    (holdout PF 1.06-1.33). 60 sits comfortably inside it.
+     *  - The earlier claim that the time stop ADDS P&L did not reproduce.
+     *    On the newer window no-limit scores +$925 against 60 bars' +$855;
+     *    on the older one it was +$50 against +$650. A swing that large from
+     *    one extra month of data means these configurations differ by less
+     *    than the noise between them.
+     *
+     * So 60 is kept for a reason that is not P&L: it roughly doubles the
+     * trade count in a given window (129 vs 70 on the holdout), and sample
+     * size is what this project is short of.
      */
     maxBarsHeld: 60,
     /**
